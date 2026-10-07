@@ -4,9 +4,9 @@ from PIL import Image
 import numpy as np
 import cv2
 
-# ===================================================
+# ============================================================
 # PAGE CONFIGURATION
-# ===================================================
+# ============================================================
 
 st.set_page_config(
     page_title="Thermal Image Analyzer",
@@ -14,34 +14,37 @@ st.set_page_config(
     layout="wide"
 )
 
-# ===================================================
-# TITLE
-# ===================================================
+# ============================================================
+# APPLICATION TITLE
+# ============================================================
 
 st.title("🌡️ Thermal Image Analyzer")
 
 st.write(
-    "Upload a thermal image to calculate the minimum "
-    "and maximum temperature and determine whether a "
-    "temperature fault is present."
+    "Upload a thermal image to calculate the minimum temperature, "
+    "maximum temperature, temperature difference, and fault status."
 )
 
-# ===================================================
+# ============================================================
 # TEMPERATURE SETTINGS
-# ===================================================
+# ============================================================
 
-# Based on the temperature range provided by the
-# Electrical Department.
+# Temporary calibration range based on the Electrical Department
+# results provided for this project.
 
-MIN_TEMPERATURE = 0.0
+MIN_TEMPERATURE = 7.0
 MAX_TEMPERATURE = 40.0
 
 # Fault threshold
 FAULT_THRESHOLD = 5.0
 
-# ===================================================
+# Percentiles used to remove extreme image pixels
+LOW_PERCENTILE = 2
+HIGH_PERCENTILE = 98
+
+# ============================================================
 # IMAGE UPLOAD
-# ===================================================
+# ============================================================
 
 uploaded_file = st.file_uploader(
     "Upload thermal image",
@@ -55,23 +58,23 @@ uploaded_file = st.file_uploader(
     ]
 )
 
-# ===================================================
-# IMAGE PROCESSING
-# ===================================================
+# ============================================================
+# MAIN ANALYSIS
+# ============================================================
 
 if uploaded_file is not None:
 
-    # ------------------------------------------------
-    # Read image
-    # ------------------------------------------------
+    # --------------------------------------------------------
+    # READ IMAGE
+    # --------------------------------------------------------
 
     image = Image.open(uploaded_file).convert("RGB")
 
     img = np.array(image)
 
-    # ------------------------------------------------
-    # Display image
-    # ------------------------------------------------
+    # --------------------------------------------------------
+    # DISPLAY IMAGE
+    # --------------------------------------------------------
 
     st.subheader("📷 Uploaded Thermal Image")
 
@@ -80,46 +83,76 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
-    # ------------------------------------------------
-    # Convert RGB image to grayscale
-    # ------------------------------------------------
+    # ========================================================
+    # IMAGE PROCESSING
+    # ========================================================
 
+    # Convert RGB image to grayscale
     gray = cv2.cvtColor(
         img,
         cv2.COLOR_RGB2GRAY
     )
 
-    # ------------------------------------------------
-    # Normalize grayscale values
-    # ------------------------------------------------
+    # Convert pixels to floating point
+    gray_float = gray.astype(np.float32)
 
-    gray_normalized = (
-        gray.astype(np.float32) / 255.0
+    # --------------------------------------------------------
+    # REMOVE EXTREME PIXELS
+    # --------------------------------------------------------
+    #
+    # Instead of using the absolute darkest and brightest
+    # pixels, use the 2nd and 98th percentile.
+    #
+    # This prevents a single black or white pixel, border,
+    # text, or image artifact from becoming Tmin or Tmax.
+    # --------------------------------------------------------
+
+    low_pixel = np.percentile(
+        gray_float,
+        LOW_PERCENTILE
     )
 
-    # ------------------------------------------------
-    # Convert pixel values to temperature
-    #
-    # Current project range:
-    # 0°C to 40°C
-    # ------------------------------------------------
+    high_pixel = np.percentile(
+        gray_float,
+        HIGH_PERCENTILE
+    )
+
+    # Prevent division by zero
+    if high_pixel <= low_pixel:
+
+        st.error(
+            "The uploaded image does not contain enough "
+            "temperature variation for analysis."
+        )
+
+        st.stop()
+
+    # ========================================================
+    # CONVERT IMAGE VALUES TO TEMPERATURE
+    # ========================================================
 
     temperature = (
         MIN_TEMPERATURE
-        + gray_normalized
-        * (MAX_TEMPERATURE - MIN_TEMPERATURE)
+        +
+        (
+            (gray_float - low_pixel)
+            /
+            (high_pixel - low_pixel)
+        )
+        *
+        (MAX_TEMPERATURE - MIN_TEMPERATURE)
     )
 
-    # Keep values inside 0–40°C
+    # Keep temperature inside the selected range
     temperature = np.clip(
         temperature,
         MIN_TEMPERATURE,
         MAX_TEMPERATURE
     )
 
-    # =================================================
-    # WHOLE IMAGE ANALYSIS
-    # =================================================
+    # ========================================================
+    # TEMPERATURE CALCULATIONS
+    # ========================================================
 
     min_temp = float(
         np.min(temperature)
@@ -137,9 +170,9 @@ if uploaded_file is not None:
         max_temp - min_temp
     )
 
-    # =================================================
+    # ========================================================
     # TEMPERATURE RESULTS
-    # =================================================
+    # ========================================================
 
     st.divider()
 
@@ -147,9 +180,9 @@ if uploaded_file is not None:
 
     c1, c2, c3, c4 = st.columns(4)
 
-    # ------------------------------------------------
-    # Minimum temperature
-    # ------------------------------------------------
+    # --------------------------------------------------------
+    # MINIMUM
+    # --------------------------------------------------------
 
     with c1:
 
@@ -158,9 +191,9 @@ if uploaded_file is not None:
             f"{min_temp:.2f} °C"
         )
 
-    # ------------------------------------------------
-    # Maximum temperature
-    # ------------------------------------------------
+    # --------------------------------------------------------
+    # MAXIMUM
+    # --------------------------------------------------------
 
     with c2:
 
@@ -169,9 +202,9 @@ if uploaded_file is not None:
             f"{max_temp:.2f} °C"
         )
 
-    # ------------------------------------------------
-    # Temperature difference
-    # ------------------------------------------------
+    # --------------------------------------------------------
+    # DIFFERENCE
+    # --------------------------------------------------------
 
     with c3:
 
@@ -180,9 +213,9 @@ if uploaded_file is not None:
             f"{difference:.2f} °C"
         )
 
-    # ------------------------------------------------
-    # Mean temperature
-    # ------------------------------------------------
+    # --------------------------------------------------------
+    # MEAN
+    # --------------------------------------------------------
 
     with c4:
 
@@ -191,9 +224,9 @@ if uploaded_file is not None:
             f"{mean_temp:.2f} °C"
         )
 
-    # =================================================
+    # ========================================================
     # FAULT ASSESSMENT
-    # =================================================
+    # ========================================================
 
     st.divider()
 
@@ -212,7 +245,7 @@ if uploaded_file is not None:
         )
 
         st.info(
-            "The temperature difference is below "
+            "Temperature difference is below "
             "the 5°C fault threshold."
         )
 
@@ -232,30 +265,34 @@ if uploaded_file is not None:
             "**Status:** Fault detected."
         )
 
-    # =================================================
+    # ========================================================
     # ANALYSIS SUMMARY
-    # =================================================
+    # ========================================================
 
     st.divider()
 
     st.subheader("📊 Analysis Summary")
 
-    status = (
-        "NO FAULT"
-        if difference < FAULT_THRESHOLD
-        else "FAULT"
-    )
+    if difference < FAULT_THRESHOLD:
 
-    required_action = (
-        "No action required"
-        if difference < FAULT_THRESHOLD
-        else "Attention required within 2 days"
-    )
+        status = "NO FAULT"
+
+        required_action = (
+            "No action required"
+        )
+
+    else:
+
+        status = "FAULT"
+
+        required_action = (
+            "Attention required within 2 days"
+        )
 
     results = {
 
         "Temperature Range":
-            "0.00 – 40.00 °C",
+            "7.00 – 40.00 °C",
 
         "Minimum Temperature":
             f"{min_temp:.2f} °C",
@@ -285,9 +322,34 @@ if uploaded_file is not None:
             f"**{key}:** {value}"
         )
 
-# ===================================================
-# INFORMATION
-# ===================================================
+    # ========================================================
+    # ANALYSIS INFORMATION
+    # ========================================================
+
+    st.divider()
+
+    st.subheader("ℹ️ Analysis Information")
+
+    st.write(
+        f"Temperature calibration range: "
+        f"{MIN_TEMPERATURE:.1f}–"
+        f"{MAX_TEMPERATURE:.1f} °C"
+    )
+
+    st.write(
+        f"Pixel analysis range: "
+        f"{LOW_PERCENTILE}th–"
+        f"{HIGH_PERCENTILE}th percentile"
+    )
+
+    st.write(
+        "Extreme pixels are ignored to reduce the effect "
+        "of image borders, text, noise, and isolated pixels."
+    )
+
+# ============================================================
+# NO IMAGE
+# ============================================================
 
 else:
 
@@ -296,11 +358,15 @@ else:
     )
 
     st.write(
-        "**Temperature range:** 0–40 °C"
+        "**Current temperature range:** 7–40 °C"
     )
 
     st.write(
         "**Fault threshold:** 5 °C"
+    )
+
+    st.write(
+        "**Fault action:** Attention required within 2 days."
     )
 
 
