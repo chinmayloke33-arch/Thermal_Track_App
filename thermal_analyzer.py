@@ -5,62 +5,210 @@ import numpy as np
 import pytesseract
 
 
-def _ocr_number(crop, whitelist="0123456789.-"):
-    """Read a number from a small image crop."""
-    if crop is None or crop.size == 0:
-        return None
+def _numeric_tokens(text):
+    """Return plausible numeric tokens from OCR text."""
+    if not text:
+        return []
 
+    # OCR often turns 25 into 2S, 21 into 2I, etc.
+    cleaned = (
+        text.upper()
+        .replace("O", "0")
+        .replace("I", "1")
+        .replace("L", "1")
+        .replace("S", "5")
+        .replace("B", "8")
+    )
+
+    return [
+        float(x)
+        for x in re.findall(r"(?<!\d)\d{1,3}(?:\.\d+)?(?!\d)", cleaned)
+    ]
+
+
+def _prepare_ocr_images(crop):
+    """Create several high-quality OCR versions of a crop."""
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    # The camera places digits inside a light gray box; removing the border
-    # greatly improves OCR accuracy.
-    hh, ww = gray.shape[:2]
-    if ww >= 20 and hh >= 10:
-        gray = gray[max(0, int(hh * 0.12)):max(1, int(hh * 0.88)),
-                    max(0, int(ww * 0.25)):min(ww, int(ww * 0.75))]
-    scale = 10
-    up = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
-    candidates = [up]
-    for threshold in (140, 160, 180, 200):
-        candidates.append(cv2.threshold(up, threshold, 255, cv2.THRESH_BINARY)[1])
+    # Upscale substantially because the camera labels are small.
+    up = cv2.resize(gray, None, fx=10, fy=10, interpolation=cv2.INTER_CUBIC)
 
+    # Light blur removes JPEG noise while preserving digits.
+    blur = cv2.GaussianBlur(up, (3, 3), 0)
+
+    images = [up]
+
+    # Otsu and adaptive threshold variants.
+    _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    images.append(otsu)
+    images.append(cv2.bitwise_not(otsu))
+
+    adaptive = cv2.adaptiveThreshold(
+        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 31, 7
+    )
+    images.append(adaptive)
+    images.append(cv2.bitwise_not(adaptive))
+
+    # Contrast enhancement.
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    contrast = clahe.apply(gray)
+    contrast = cv2.resize(
+        contrast, None, fx=10, fy=10, interpolation=cv2.INTER_CUBIC
+    )
+    images.append(contrast)
+
+    return images
+
+
+def _ocr_crop(crop):
+    """OCR a crop using several preprocessing and Tesseract modes."""
     values = []
-    for img in candidates:
-        for psm in (7, 8, 10):
-            text = pytesseract.image_to_string(
-                img,
-                config=f"--psm {psm} -c tessedit_char_whitelist={whitelist}"
-            ).strip()
-            m = re.search(r"-?\d+(?:\.\d+)?", text)
-            if m:
-                try:
-                    values.append(float(m.group()))
-                except ValueError:
-                    pass
+
+    for img in _prepare_ocr_images(crop):
+        for psm in (6, 7, 8, 10, 11, 13):
+            config = (
+                f"--oem 3 --psm {psm} "
+                "-c tessedit_char_whitelist=0123456789"
+            )
+
+            text = pytesseract.image_to_string(img, config=config)
+            values.extend(_numeric_tokens(text))
+
+    # Keep temperatures in a realistic camera-display range.
+    values = [v for v in values if -100 <= v <= 200]
 
     if not values:
         return None
 
-    # Most common OCR value; this is more stable than trusting one OCR pass.
+    # Most frequent value wins.
     counts = {}
-    for v in values:
-        key = round(v, 3)
+    for value in values:
+        key = round(value, 2)
         counts[key] = counts.get(key, 0) + 1
 
     return max(counts, key=counts.get)
 
 
-def _find_temperature_boxes(image):
+def _ocr_right_scale(image):
     """
-    Find the two light rectangular boxes containing the temperature
-    scale numbers, normally on the right side of the thermal image.
+    Read the temperature numbers directly from the right-hand scale area.
+
+    This is the primary OCR method. It does not depend on finding the
+    rectangular border of the number box perfectly.
     """
     h, w = image.shape[:2]
-    x0 = int(w * 0.82)
+
+    # In the supplied camera format the scale is on the right.
+    x0 = int(w * 0.84)
+    x1 = w
+    roi = image[0:h, x0:x1]
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    up = cv2.resize(gray, None, fx=6, fy=6, interpolation=cv2.INTER_CUBIC)
+
+    all_candidates = []
+
+    for img in [
+        up,
+        cv2.threshold(up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+        cv2.adaptiveThreshold(
+            up, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 41, 9
+        ),
+    ]:
+        for psm in (6, 11, 12):
+            data = pytesseract.image_to_data(
+                img,
+                config=(
+                    f"--oem 3 --psm {psm} "
+                    "-c tessedit_char_whitelist=0123456789"
+                ),
+                output_type=pytesseract.Output.DICT,
+            )
+
+            for i, raw in enumerate(data["text"]):
+                vals = _numeric_tokens(raw)
+                if not vals:
+                    continue
+
+                try:
+                    conf = float(data["conf"][i])
+                except Exception:
+                    conf = 0
+
+                # Coordinates are in the upscaled ROI.
+                cx = (data["left"][i] + data["width"][i] / 2) / 6
+                cy = (data["top"][i] + data["height"][i] / 2) / 6
+
+                for value in vals:
+                    if -100 <= value <= 200 and data["width"][i] > 5:
+                        all_candidates.append({
+                            "value": value,
+                            "x": cx + x0,
+                            "y": cy,
+                            "confidence": conf,
+                        })
+
+    if not all_candidates:
+        return None
+
+    # The top scale number and bottom scale number are the candidates
+    # nearest the upper/lower parts of the right-side scale.
+    # Group near-identical OCR readings.
+    groups = {}
+    for c in all_candidates:
+        key = round(c["value"], 1)
+        groups.setdefault(key, []).append(c)
+
+    representatives = []
+    for value, items in groups.items():
+        best = max(items, key=lambda z: z["confidence"])
+        representatives.append({
+            "value": value,
+            "y": float(np.median([z["y"] for z in items])),
+            "confidence": max(z["confidence"] for z in items),
+        })
+
+    # Need two different values. Prefer candidates that are vertically far apart.
+    best_pair = None
+    best_score = -1
+
+    for i in range(len(representatives)):
+        for j in range(i + 1, len(representatives)):
+            a = representatives[i]
+            b = representatives[j]
+
+            dy = abs(a["y"] - b["y"])
+            if dy < 80:
+                continue
+
+            score = dy + 0.2 * (a["confidence"] + b["confidence"])
+
+            if score > best_score:
+                best_score = score
+                best_pair = (a, b)
+
+    if best_pair is None:
+        return None
+
+    a, b = sorted(best_pair, key=lambda z: z["y"])
+
+    return {
+        "top_temperature": float(a["value"]),
+        "bottom_temperature": float(b["value"]),
+        "top_y": a["y"],
+        "bottom_y": b["y"],
+    }
+
+
+def _find_temperature_boxes(image):
+    h, w = image.shape[:2]
+    x0 = int(w * 0.80)
     roi = image[:, x0:]
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    bright = cv2.inRange(gray, 160, 255)
+    bright = cv2.inRange(gray, 150, 255)
 
     contours, _ = cv2.findContours(
         bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -71,71 +219,100 @@ def _find_temperature_boxes(image):
         x, y, bw, bh = cv2.boundingRect(c)
         area = bw * bh
 
-        if 25 <= bw <= 100 and 15 <= bh <= 50 and 400 <= area <= 5000:
-            # Convert ROI coordinates back to image coordinates.
+        if 20 <= bw <= 120 and 12 <= bh <= 70 and 250 <= area <= 8000:
             boxes.append((x + x0, y, bw, bh))
 
-    # Remove near-duplicates.
     unique = []
     for b in sorted(boxes, key=lambda z: z[1]):
-        if not any(abs(b[0] - q[0]) < 5 and abs(b[1] - q[1]) < 8 for q in unique):
+        if not any(abs(b[0] - q[0]) < 8 and abs(b[1] - q[1]) < 10 for q in unique):
             unique.append(b)
 
     return sorted(unique, key=lambda z: z[1])
 
 
 def detect_temperature_scale(image):
-    """Automatically detect the top/bottom temperature labels and color bar."""
+    """
+    Automatically detect temperature endpoints.
+
+    Primary method: OCR the entire right-side scale.
+    Fallback: locate the two light boxes and OCR enlarged crops.
+    """
+    ocr_result = _ocr_right_scale(image)
+
     boxes = _find_temperature_boxes(image)
 
-    if len(boxes) < 2:
-        raise ValueError(
-            "Could not automatically find the two temperature-scale labels."
-        )
+    if ocr_result is not None:
+        top_temp = ocr_result["top_temperature"]
+        bottom_temp = ocr_result["bottom_temperature"]
 
-    # Normally the first and last boxes are the upper and lower scale values.
-    top_box = boxes[0]
-    bottom_box = boxes[-1]
+        # The color bar is normally between the two labels.
+        if boxes:
+            x_center = int(np.mean([
+                b[0] + b[2] / 2 for b in boxes
+            ]))
+            top_y = int(ocr_result["top_y"])
+            bottom_y = int(ocr_result["bottom_y"])
+        else:
+            h, w = image.shape[:2]
+            x_center = int(w * 0.94)
+            top_y = int(image.shape[0] * 0.18)
+            bottom_y = int(image.shape[0] * 0.86)
 
-    def crop_box(b, pad=3):
-        x, y, w, h = b
-        return image[
-            max(0, y - pad):min(image.shape[0], y + h + pad),
-            max(0, x - pad):min(image.shape[1], x + w + pad)
-        ]
+        y_start = top_y + 25
+        y_end = bottom_y - 25
 
-    top_temp = _ocr_number(crop_box(top_box))
-    bottom_temp = _ocr_number(crop_box(bottom_box))
+        if y_end > y_start + 20:
+            return {
+                "top_temperature": top_temp,
+                "bottom_temperature": bottom_temp,
+                "x_center": x_center,
+                "y_start": y_start,
+                "y_end": y_end,
+            }
 
-    if top_temp is None or bottom_temp is None:
-        raise ValueError(
-            "Temperature labels were found, but OCR could not read both values."
-        )
+    # Fallback: enlarged OCR of detected boxes.
+    if len(boxes) >= 2:
+        top_box = boxes[0]
+        bottom_box = boxes[-1]
 
-    # Color-bar x-position is near the center of the temperature boxes.
-    x_center = int(round((top_box[0] + top_box[2] / 2 +
-                          bottom_box[0] + bottom_box[2] / 2) / 2))
+        def enlarged_crop(box):
+            x, y, bw, bh = box
+            pad_x = max(20, bw)
+            pad_y = max(12, bh)
+            return image[
+                max(0, y - pad_y):min(image.shape[0], y + bh + pad_y),
+                max(0, x - pad_x):min(image.shape[1], x + bw + pad_x)
+            ]
 
-    # The actual color bar lies between the two number boxes.
-    y_start = top_box[1] + top_box[3] + 7
-    y_end = bottom_box[1] - 12
+        top_temp = _ocr_crop(enlarged_crop(top_box))
+        bottom_temp = _ocr_crop(enlarged_crop(bottom_box))
 
-    if y_end <= y_start + 20:
-        raise ValueError("Could not determine the vertical temperature color bar.")
+        if top_temp is not None and bottom_temp is not None:
+            x_center = int(
+                (top_box[0] + top_box[2] / 2 +
+                 bottom_box[0] + bottom_box[2] / 2) / 2
+            )
 
-    return {
-        "top_temperature": float(top_temp),
-        "bottom_temperature": float(bottom_temp),
-        "x_center": x_center,
-        "y_start": y_start,
-        "y_end": y_end,
-        "top_box": top_box,
-        "bottom_box": bottom_box,
-    }
+            y_start = top_box[1] + top_box[3] + 4
+            y_end = bottom_box[1] - 4
+
+            if y_end > y_start + 20:
+                return {
+                    "top_temperature": float(top_temp),
+                    "bottom_temperature": float(bottom_temp),
+                    "x_center": x_center,
+                    "y_start": y_start,
+                    "y_end": y_end,
+                }
+
+    raise ValueError(
+        "Temperature labels were found, but OCR could not reliably read "
+        "both values. Please use a clearer image or send this image to "
+        "the developer for calibration."
+    )
 
 
 def _vertical_white_segments(image):
-    """Find narrow vertical white/gray marker segments."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     white = cv2.inRange(gray, 200, 255)
 
@@ -152,12 +329,11 @@ def _vertical_white_segments(image):
     for c in contours:
         x, y, bw, bh = cv2.boundingRect(c)
 
-        # Marker segments are small vertical bars.
         if (
-            0.25 * w < x < 0.90 * w
+            0.18 * w < x < 0.90 * w
             and 0.15 * h < y < 0.70 * h
-            and 1 <= bw <= 6
-            and 9 <= bh <= 35
+            and 1 <= bw <= 7
+            and 8 <= bh <= 40
             and bw * bh >= 12
         ):
             segments.append((x, y, bw, bh))
@@ -166,52 +342,42 @@ def _vertical_white_segments(image):
 
 
 def detect_measurement_points(image):
-    """
-    Detect the camera's P1/P2 crosshair markers.
-
-    A marker consists of two aligned vertical white segments separated
-    by a small gap. The center between those segments is the measurement
-    point.
-    """
     segments = _vertical_white_segments(image)
 
     pairs = []
-    for a in segments:
+    for i, a in enumerate(segments):
         ax, ay, aw, ah = a
         acx = ax + aw / 2
         acy = ay + ah / 2
 
-        for b in segments:
-            if b is a:
+        for j, b in enumerate(segments):
+            if i == j:
                 continue
 
             bx, by, bw, bh = b
             bcx = bx + bw / 2
             bcy = by + bh / 2
 
-            # Same vertical line, separated by the horizontal marker.
-            if abs(acx - bcx) <= 4 and 12 <= abs(acy - bcy) <= 55:
+            if abs(acx - bcx) <= 5 and 10 <= abs(acy - bcy) <= 60:
                 upper, lower = (a, b) if ay < by else (b, a)
 
-                # Avoid treating two parts of the same line as a duplicate.
-                center_x = (upper[0] + upper[2] / 2 +
-                            lower[0] + lower[2] / 2) / 2
+                center_x = (
+                    upper[0] + upper[2] / 2 +
+                    lower[0] + lower[2] / 2
+                ) / 2
                 center_y = (
                     upper[1] + upper[3] / 2 +
                     lower[1] + lower[3] / 2
                 ) / 2
 
-                score = abs(acx - bcx) + abs((lower[1] - (upper[1] + upper[3])) - 18)
-
                 pairs.append({
                     "x": float(center_x),
                     "y": float(center_y),
-                    "score": float(score),
+                    "score": abs(acx - bcx),
                 })
 
-    # Deduplicate centers.
     unique = []
-    for p in sorted(pairs, key=lambda q: q["score"]):
+    for p in pairs:
         if not any(
             abs(p["x"] - q["x"]) < 8 and abs(p["y"] - q["y"]) < 8
             for q in unique
@@ -223,55 +389,18 @@ def detect_measurement_points(image):
             "Could not automatically detect both P1 and P2 measurement points."
         )
 
-    # For this camera layout, the point numbered 1 is normally the right-hand
-    # marker and point numbered 2 is the left-hand marker. We also try OCR
-    # locally to confirm the point numbers.
+    # The supplied camera layout has P2 on the left and P1 on the right.
     unique = sorted(unique, key=lambda p: p["x"])
-
-    labelled = []
-    for p in unique[:6]:
-        x, y = int(round(p["x"])), int(round(p["y"]))
-        h, w = image.shape[:2]
-
-        x1, x2 = max(0, x - 30), min(w, x + 30)
-        y1, y2 = max(0, y - 8), min(h, y + 42)
-
-        crop = image[y1:y2, x1:x2]
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        up = cv2.resize(gray, None, fx=10, fy=10, interpolation=cv2.INTER_CUBIC)
-
-        number = None
-        for threshold in (140, 160, 180, 200):
-            binary = cv2.threshold(up, threshold, 255, cv2.THRESH_BINARY)[1]
-            text = pytesseract.image_to_string(
-                binary,
-                config="--psm 10 -c tessedit_char_whitelist=12"
-            )
-            if "1" in text:
-                number = 1
-                break
-            if "2" in text:
-                number = 2
-                break
-
-        labelled.append({**p, "label": number})
-
-    p1 = next((p for p in labelled if p["label"] == 1), None)
-    p2 = next((p for p in labelled if p["label"] == 2), None)
-
-    if p1 is None or p2 is None:
-        # Fallback for the common camera layout:
-        # left marker = P2, right marker = P1.
-        p2, p1 = labelled[0], labelled[1]
+    p2 = unique[0]
+    p1 = unique[1]
 
     return {
-        "P1": (float(p1["x"]), float(p1["y"])),
-        "P2": (float(p2["x"]), float(p2["y"])),
+        "P1": (p1["x"], p1["y"]),
+        "P2": (p2["x"], p2["y"]),
     }
 
 
 def _build_color_palette(image, scale):
-    """Build a vertical BGR palette from the detected color bar."""
     x = int(scale["x_center"])
     y1 = int(scale["y_start"])
     y2 = int(scale["y_end"])
@@ -284,11 +413,9 @@ def _build_color_palette(image, scale):
 
     for y in range(y1, y2 + 1):
         row = image[y, x1:x2]
-
         if row.size == 0:
             continue
 
-        # Median is less affected by the black border and compression noise.
         color = np.median(row, axis=0)
         palette.append(color)
         ys.append(y)
@@ -297,10 +424,6 @@ def _build_color_palette(image, scale):
 
 
 def _point_temperature(image, point, palette, ys, scale):
-    """
-    Estimate temperature around a point by matching nearby thermal colors
-    to the detected color-bar palette.
-    """
     x, y = int(round(point[0])), int(round(point[1]))
     radius = 9
 
@@ -311,18 +434,16 @@ def _point_temperature(image, point, palette, ys, scale):
         for xx in range(max(0, x - radius), min(image.shape[1], x + radius + 1)):
             h, s, v = hsv[yy, xx]
 
-            # Ignore the white/gray camera crosshair overlay.
+            # Ignore the white/gray marker overlay.
             if s >= 60 and v >= 25:
                 samples.append(image[yy, xx].astype(np.float32))
 
     if len(samples) < 10:
         raise ValueError(
-            f"Not enough thermal-color pixels were found around point ({x}, {y})."
+            f"Not enough thermal-color pixels were found around ({x}, {y})."
         )
 
     samples = np.asarray(samples)
-
-    # Convert each sample to the nearest color-bar position.
     temperatures = []
 
     for color in samples:
@@ -341,20 +462,15 @@ def _point_temperature(image, point, palette, ys, scale):
 
         temperatures.append(temp)
 
-    # The point marker sits on a hot rail while nearby background is often
-    # much colder.  Taking the upper quartile suppresses the background and
-    # the white/black marker overlay while retaining the rail temperature.
-    return float(np.percentile(temperatures, 75))
+    return float(np.median(temperatures))
 
 
 def analyze_image(image):
-    """Complete automatic analysis."""
     if image is None:
         raise ValueError("No image was provided.")
 
     scale = detect_temperature_scale(image)
     points = detect_measurement_points(image)
-
     palette, ys = _build_color_palette(image, scale)
 
     p1_temp = _point_temperature(
@@ -387,7 +503,6 @@ def analyze_image(image):
 
 
 def create_result_image(image, result):
-    """Draw detected P1/P2 and analysis information on the image."""
     output = image.copy()
 
     for label in ("P1", "P2"):
@@ -406,7 +521,7 @@ def create_result_image(image, result):
             cv2.LINE_AA,
         )
 
-    text_lines = [
+    lines = [
         f"P1: {result['P1_temperature']:.2f} C",
         f"P2: {result['P2_temperature']:.2f} C",
         f"Difference: {result['difference']:.2f} C",
@@ -414,17 +529,13 @@ def create_result_image(image, result):
     ]
 
     y = 30
-    for line in text_lines:
+    for line in lines:
         cv2.putText(
-            output,
-            line,
-            (10, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
+            output, line, (10, y),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.65,
+            (255, 255, 255), 2, cv2.LINE_AA
         )
         y += 28
 
     return output
+
