@@ -16,8 +16,8 @@ st.set_page_config(
 
 st.title("🌡️ Thermal Image Analyzer")
 st.write(
-    "Upload a thermal image, crop directly around the active conductor or target asset "
-    "(excluding legends/background), and analyze localized $\Delta T$."
+    "Upload a thermal image, crop directly around the active component "
+    "(excluding background noise and scale legends), and analyze localized $\Delta T$."
 )
 
 # ============================================================
@@ -64,6 +64,7 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file).convert("RGB")
+    full_image_np = np.array(image)
 
     st.write("---")
     st.subheader("✂️ Interactive Component Selection")
@@ -85,12 +86,14 @@ if uploaded_file is not None:
         st.subheader("Selected Region Preview")
         st.image(cropped_img, use_container_width=True)
 
-    # Process selected ROI
-    img_array = np.array(cropped_img)
+    # Convert cropped selection to NumPy array
+    cropped_roi_np = np.array(cropped_img)
 
     try:
+        # Passes both full frame (for global scale) and cropped region (for local ΔT)
         results = analyze_thermal_image(
-            image=img_array,
+            full_image=full_image_np,
+            cropped_roi=cropped_roi_np,
             known_cold_temp=known_cold,
             known_hot_temp=known_hot,
             threshold=fault_thresh
