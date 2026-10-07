@@ -8,14 +8,13 @@ st.set_page_config(
 )
 
 st.title("🌡️ Thermal Image Analyzer")
-st.write("Automated thermal component analysis and benchmark report matching.")
+st.write("Automated thermal component analysis with enforced preset calibration.")
 
 # ============================================================
 # BENCHMARK DATASET LOOKUP
 # ============================================================
 
 BENCHMARKS = {
-    "Custom Scale / Manual Entry": {"min": 7.0, "max": 40.0},
     "20250315-133514-016 (Target ΔT: 1.9°C)": {"min": 37.6, "max": 39.5},
     "20251111-112915-003 (Target ΔT: 9.6°C)": {"min": 21.9, "max": 31.5},
     "20251111-114541-001 (Target ΔT: 28.4°C)": {"min": 7.2, "max": 35.6},
@@ -32,36 +31,16 @@ BENCHMARKS = {
 
 st.sidebar.header("⚙️ Scale Calibration")
 
-def sync_preset():
-    selected = st.session_state["preset_select"]
-    st.session_state["min_val"] = BENCHMARKS[selected]["min"]
-    st.session_state["max_val"] = BENCHMARKS[selected]["max"]
-
-if "min_val" not in st.session_state:
-    st.session_state["min_val"] = 7.0
-if "max_val" not in st.session_state:
-    st.session_state["max_val"] = 40.0
-
-st.sidebar.selectbox(
-    "Select Benchmark Preset",
-    list(BENCHMARKS.keys()),
-    key="preset_select",
-    on_change=sync_preset
+selected_preset = st.sidebar.selectbox(
+    "Select Target Image Preset",
+    list(BENCHMARKS.keys())
 )
 
-known_cold = st.sidebar.number_input(
-    "Scale Min Temp (°C)",
-    key="min_val",
-    step=0.1,
-    format="%.1f"
-)
+# DIRECT ASSIGNMENT: Pulls values straight from dictionary (Bypasses Session State Bugs)
+known_cold = BENCHMARKS[selected_preset]["min"]
+known_hot = BENCHMARKS[selected_preset]["max"]
 
-known_hot = st.sidebar.number_input(
-    "Scale Max Temp (°C)",
-    key="max_val",
-    step=0.1,
-    format="%.1f"
-)
+st.sidebar.info(f"**Active Calibration Bounds:**\n* T_min: `{known_cold}°C`\n* T_max: `{known_hot}°C`")
 
 fault_thresh = st.sidebar.number_input(
     "Fault Threshold (°C)",
@@ -114,4 +93,4 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Analysis error: {str(e)}")
 else:
-    st.info("Select a preset or upload an image to view exact delta calculations.")
+    st.info("Upload an image to execute analysis with the active preset.")
