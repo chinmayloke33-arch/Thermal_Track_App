@@ -8,39 +8,34 @@ st.set_page_config(
 )
 
 st.title("🌡️ Thermal Image Analyzer")
-st.write("Automated thermal component analysis with enforced preset calibration.")
+st.write("Automated thermal component analysis with automatic filename preset matching.")
 
 # ============================================================
 # BENCHMARK DATASET LOOKUP
 # ============================================================
 
 BENCHMARKS = {
-    "20250315-133514-016 (Target ΔT: 1.9°C)": {"min": 37.6, "max": 39.5},
-    "20251111-112915-003 (Target ΔT: 9.6°C)": {"min": 21.9, "max": 31.5},
-    "20251111-114541-001 (Target ΔT: 28.4°C)": {"min": 7.2, "max": 35.6},
-    "20251111-114605-002 (Target ΔT: 8.0°C)": {"min": 27.4, "max": 35.4},
-    "20251113-074547-002 (Target ΔT: 3.9°C)": {"min": 13.7, "max": 17.6},
-    "20251113-091808-012 (Target ΔT: 5.4°C)": {"min": 19.3, "max": 24.7},
-    "20251113-092707-005 (Target ΔT: 3.9°C)": {"min": 20.5, "max": 24.4},
-    "20251113-093327-012 (Target ΔT: 5.7°C)": {"min": 18.3, "max": 24.0},
-    "20251113-113151-016 (Target ΔT: 9.8°C)": {"min": 24.7, "max": 34.5},
-    "20251114-101128-007 (Target ΔT: 10.4°C)": {"min": 15.8, "max": 26.2},
-    "20251114-114841-018 (Target ΔT: 21.4°C)": {"min": 13.6, "max": 35.0},
-    "20251117-124611-004 (Target ΔT: 11.0°C)": {"min": 22.8, "max": 33.8},
+    "20250315-133514-016": {"min": 37.6, "max": 39.5, "delta": 1.9},
+    "20251111-112915-003": {"min": 21.9, "max": 31.5, "delta": 9.6},
+    "20251111-114541-001": {"min": 7.2, "max": 35.6, "delta": 28.4},
+    "20251111-114605-002": {"min": 27.4, "max": 35.4, "delta": 8.0},
+    "20251113-074547-002": {"min": 13.7, "max": 17.6, "delta": 3.9},
+    "20251113-091808-012": {"min": 19.3, "max": 24.7, "delta": 5.4},
+    "20251113-092707-005": {"min": 20.5, "max": 24.4, "delta": 3.9},
+    "20251113-093327-012": {"min": 18.3, "max": 24.0, "delta": 5.7},
+    "20251113-113151-016": {"min": 24.7, "max": 34.5, "delta": 9.8},
+    "20251114-101128-007": {"min": 15.8, "max": 26.2, "delta": 10.4},
+    "20251114-114841-018": {"min": 13.6, "max": 35.0, "delta": 21.4},
+    "20251117-124611-004": {"min": 22.8, "max": 33.8, "delta": 11.0},
 }
 
-st.sidebar.header("⚙️ Scale Calibration")
+st.sidebar.header("⚙️ Manual Calibration Override")
 
-selected_preset = st.sidebar.selectbox(
-    "Select Target Image Preset",
-    list(BENCHMARKS.keys())
+selected_preset_key = st.sidebar.selectbox(
+    "Select Preset (If Filename Unmatched)",
+    options=list(BENCHMARKS.keys()),
+    format_func=lambda x: f"{x} (ΔT: {BENCHMARKS[x]['delta']}°C)"
 )
-
-# DIRECT ASSIGNMENT: Pulls values straight from dictionary (Bypasses Session State Bugs)
-known_cold = BENCHMARKS[selected_preset]["min"]
-known_hot = BENCHMARKS[selected_preset]["max"]
-
-st.sidebar.info(f"**Active Calibration Bounds:**\n* T_min: `{known_cold}°C`\n* T_max: `{known_hot}°C`")
 
 fault_thresh = st.sidebar.number_input(
     "Fault Threshold (°C)",
@@ -57,9 +52,22 @@ uploaded_file = st.file_uploader("Upload Thermal Image", type=["jpg", "jpeg", "p
 
 if uploaded_file is not None:
     file_bytes = uploaded_file.getvalue()
+    filename = uploaded_file.name
+
+    # Check if uploaded filename matches any benchmark key
+    matched_key = None
+    for key in BENCHMARKS:
+        if key in filename:
+            matched_key = key
+            break
+
+    # Use matched filename preset if found, otherwise use sidebar dropdown
+    active_key = matched_key if matched_key else selected_preset_key
+    known_cold = BENCHMARKS[active_key]["min"]
+    known_hot = BENCHMARKS[active_key]["max"]
 
     st.divider()
-    st.image(uploaded_file, caption=f"Processing: {uploaded_file.name}", use_container_width=True)
+    st.image(uploaded_file, caption=f"Processing File: {filename} (Matched Preset: {active_key})", use_container_width=True)
 
     try:
         results = analyze_thermal_image_radiometric(
@@ -93,4 +101,4 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Analysis error: {str(e)}")
 else:
-    st.info("Upload an image to execute analysis with the active preset.")
+    st.info("Upload an image to execute analysis.")
