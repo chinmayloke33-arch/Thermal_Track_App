@@ -9,41 +9,35 @@ def analyze_thermal_image(
     threshold: float = 5.0
 ) -> dict:
     """
-    Analyzes thermal images by extracting lightness intensity across HSV color space.
+    Analyzes relative thermal variations by focusing on active regions 
+    and avoiding fixed min/max range locking.
     """
-    # 1. Convert RGB to HSV to capture hue and value (brightness) accurately
-    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    # 1. Convert to grayscale/intensity map
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     
-    # Extract Value (brightness) and Saturation components
-    v_channel = hsv[:, :, 2].astype(np.float32)
-    s_channel = hsv[:, :, 1].astype(np.float32)
+    # 2. Focus analysis on central 80% to ignore border legends, text, and scales
+    h, w = gray.shape
+    roi = gray[int(h * 0.1):int(h * 0.9), int(w * 0.1):int(w * 0.9)]
 
-    # Combine Value and Saturation to avoid colorbar text or dark background artifacts
-    thermal_intensity = v_channel * (s_channel / 255.0)
+    # 3. Use standard deviation & distribution percentiles instead of absolute min/max
+    mean_val = np.mean(roi)
+    std_val = np.std(roi)
 
-    # 2. Extract relative pixel intensity range (excluding top/bottom 1% extremes)
-    p_min = np.percentile(thermal_intensity, 1)
-    p_max = np.percentile(thermal_intensity, 99)
+    # Define baseline temperature (ambient) and peak temperature (hotspot)
+    low_val = np.clip(mean_val - (1.5 * std_val), np.min(roi), np.max(roi))
+    high_val = np.clip(mean_val + (2.5 * std_val), np.min(roi), np.max(roi))
 
-    if p_max <= p_min:
-        raise ValueError("Image lacks sufficient thermal variation for analysis.")
+    # 4. Map pixel values to temperature scale range
+    scale_span = max_scale_temp - min_scale_temp
+    
+    min_temp = float(min_scale_temp + (low_val / 255.0) * scale_span)
+    max_temp = float(min_scale_temp + (high_val / 255.0) * scale_span)
+    mean_temp = float(min_scale_temp + (mean_val / 255.0) * scale_span)
+    
+    # Dynamic temperature difference based on subject hotspot vs ambient
+    temp_diff = float(max_temp - min_temp)
 
-    # 3. Normalize intensity mapping
-    normalized = np.clip((thermal_intensity - p_min) / (p_max - p_min), 0.0, 1.0)
-
-    # 4. Map to target temperature range
-    temperature_map = min_scale_temp + normalized * (max_scale_temp - min_scale_temp)
-
-    # 5. Calculate statistics from valid region (ignoring background black padding)
-    mask = thermal_intensity > np.percentile(thermal_intensity, 5)
-    valid_temps = temperature_map[mask] if np.any(mask) else temperature_map
-
-    min_temp = float(np.min(valid_temps))
-    max_temp = float(np.max(valid_temps))
-    mean_temp = float(np.mean(valid_temps))
-    temp_diff = max_temp - min_temp
-
-    # 6. Fault assessment logic
+    # 5. Fault decision logic
     if temp_diff < threshold:
         status = "NO FAULT"
         action = "No immediate action required."
@@ -52,10 +46,10 @@ def analyze_thermal_image(
         action = "Attention required within 2 days."
 
     return {
-        "min_temperature": min_temp,
-        "max_temperature": max_temp,
-        "temperature_difference": temp_diff,
-        "mean_temperature": mean_temp,
+        "min_temperature": round(min_temp, 2),
+        "max_temperature": round(max_temp, 2),
+        "temperature_difference": round(temp_diff, 2),
+        "mean_temperature": round(mean_temp, 2),
         "threshold": threshold,
         "status": status,
         "action": action
