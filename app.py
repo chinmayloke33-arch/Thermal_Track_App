@@ -8,14 +8,14 @@ st.set_page_config(
 )
 
 st.title("🌡️ Thermal Image Analyzer")
-st.write("Automated thermal component analysis with dynamic scale calibration.")
+st.write("Automated thermal component analysis and benchmark report matching.")
 
 # ============================================================
-# BENCHMARK DATASET LOOKUP (Matches sheet values)
+# BENCHMARK DATASET LOOKUP
 # ============================================================
 
 BENCHMARKS = {
-    "Manual Scale Entry": {"min": 7.0, "max": 40.0},
+    "Custom Scale / Manual Entry": {"min": 7.0, "max": 40.0},
     "20250315-133514-016 (Target ΔT: 1.9°C)": {"min": 37.6, "max": 39.5},
     "20251111-112915-003 (Target ΔT: 9.6°C)": {"min": 21.9, "max": 31.5},
     "20251111-114541-001 (Target ΔT: 28.4°C)": {"min": 7.2, "max": 35.6},
@@ -95,23 +95,23 @@ if uploaded_file is not None:
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.metric("T_min (Baseline)", f"{results['min_temperature']} °C")
+            st.metric("T_min (Baseline)", f"{results['min_temperature']:.1f} °C")
         with c2:
-            st.metric("T_max (Hotspot)", f"{results['max_temperature']} °C")
+            st.metric("T_max (Hotspot)", f"{results['max_temperature']:.1f} °C")
         with c3:
-            st.metric("Calculated ΔT", f"{results['temperature_difference']} °C")
+            st.metric("Calculated ΔT", f"{results['temperature_difference']:.1f} °C")
         with c4:
-            st.metric("T_mean", f"{results['mean_temperature']} °C")
+            st.metric("T_mean", f"{results['mean_temperature']:.1f} °C")
 
         st.divider()
         st.subheader("🚦 Fault Diagnosis")
 
         if results["status"] == "FAULT":
-            st.error(f"⚠️ FAULT DETECTED: Calculated ΔT ({results['temperature_difference']} °C) >= Threshold ({results['threshold']} °C)")
+            st.error(f"⚠️ FAULT DETECTED: Calculated ΔT ({results['temperature_difference']:.1f} °C) >= Threshold ({results['threshold']:.1f} °C)")
         else:
-            st.success(f"✅ NO FAULT: Calculated ΔT ({results['temperature_difference']} °C) < Threshold ({results['threshold']} °C)")
+            st.success(f"✅ NO FAULT: Calculated ΔT ({results['temperature_difference']:.1f} °C) < Threshold ({results['threshold']:.1f} °C)")
 
     except Exception as e:
         st.error(f"Analysis error: {str(e)}")
 else:
-    st.info("Select a preset or upload an image to view dynamic delta calculations.")
+    st.info("Select a preset or upload an image to view exact delta calculations.")
