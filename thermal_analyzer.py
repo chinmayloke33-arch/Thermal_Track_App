@@ -1,44 +1,42 @@
-import tempfile
-from flirimageextractor import FlirImageExtractor
+import cv2
 import numpy as np
 
 
 def analyze_thermal_image(
-    uploaded_file,
+    image: np.ndarray,
+    known_cold_temp: float = 7.0,
+    known_hot_temp: float = 40.0,
     threshold: float = 5.0
 ) -> dict:
     """
-    Extracts raw per-pixel temperatures directly from FLIR radiometric metadata.
+    Maps image pixel intensities linearly based on two verified spot temperature measurements.
     """
-    # Write uploaded stream to a temporary file for ExifTool processing
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        tmp.write(uploaded_file.getvalue())
-        tmp_path = tmp.name
+    # Convert RGB to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    flir = FlirImageExtractor()
-    flir.process_image(tmp_path)
+    # Filter out extreme outer margin text and legends
+    h, w = gray.shape
+    roi = gray[int(h * 0.05):int(h * 0.95), int(w * 0.05):int(w * 0.95)]
 
-    # Extract 2D array of actual temperatures in Celsius
-    thermal_matrix = flir.get_thermal_np()
+    min_pixel = float(np.min(roi))
+    max_pixel = float(np.max(roi))
 
-    if thermal_matrix is None or thermal_matrix.size == 0:
-        raise ValueError(
-            "No radiometric metadata found in this image. "
-            "Please ensure the image was captured directly by a supported radiometric camera."
-        )
+    if max_pixel <= min_pixel:
+        raise ValueError("Image lacks sufficient thermal variation for analysis.")
 
-    # Calculate exact temperatures
-    min_temp = float(np.min(thermal_matrix))
-    max_temp = float(np.max(thermal_matrix))
-    mean_temp = float(np.mean(thermal_matrix))
-    temp_diff = float(max_temp - min_temp)
+    # Calculate scale factor per pixel unit
+    temp_per_unit = (known_hot_temp - known_cold_temp) / (max_pixel - min_pixel)
 
-    if temp_diff < threshold:
-        status = "NO FAULT"
-        action = "Operating within normal thermal parameters."
-    else:
-        status = "FAULT"
-        action = "Attention required within 2 days."
+    # Convert entire ROI array to actual Celsius
+    actual_temperatures = known_cold_temp + (roi - min_pixel) * temp_per_unit
+
+    min_temp = float(np.min(actual_temperatures))
+    max_temp = float(np.max(actual_temperatures))
+    mean_temp = float(np.mean(actual_temperatures))
+    temp_diff = max_temp - min_temp
+
+    status = "FAULT" if temp_diff >= threshold else "NO FAULT"
+    action = "Attention required within 2 days." if status == "FAULT" else "Normal operation."
 
     return {
         "min_temperature": round(min_temp, 2),
