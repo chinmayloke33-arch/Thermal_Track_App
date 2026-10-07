@@ -9,49 +9,44 @@ def analyze_thermal_image(
     threshold: float = 5.0
 ) -> dict:
     """
-    Measures localized hotspot delta relative to adjacent operational baselines
-    to deliver accurate physical inspection ΔT values.
+    Measures micro-localized Delta T between peak hotspot cluster 
+    and immediate adjacent conductor baseline.
     """
     # 1. Convert to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    # 2. Crop inner 70% ROI to remove scale bars, legends, and outer background
+    # 2. Crop inner 60% ROI to focus strictly on target equipment
     h, w = gray.shape
-    roi = gray[int(h * 0.15):int(h * 0.85), int(w * 0.15):int(w * 0.85)]
+    roi = gray[int(h * 0.2):int(h * 0.8), int(w * 0.2):int(w * 0.8)]
 
-    # 3. Apply Gaussian blur to reduce single-pixel noise and artifacts
-    blurred_roi = cv2.GaussianBlur(roi, (5, 5), 0)
+    # 3. Apply Gaussian blur to eliminate minor image noise
+    blurred = cv2.GaussianBlur(roi, (5, 5), 0)
 
-    # 4. Extract localized hotspot cluster (top 2% highest intensity pixels)
-    hotspot_threshold = np.percentile(blurred_roi, 98)
-    hotspot_pixels = blurred_roi[blurred_roi >= hotspot_threshold]
+    # 4. Extract peak hotspot (99.5th percentile)
+    hotspot_val = np.percentile(blurred, 99.5)
 
-    # 5. Extract adjacent operating component baseline (80th to 90th percentile region)
-    # This represents healthy carrying equipment rather than cold background air
-    baseline_lower = np.percentile(blurred_roi, 80)
-    baseline_upper = np.percentile(blurred_roi, 90)
-    baseline_pixels = blurred_roi[(blurred_roi >= baseline_lower) & (blurred_roi <= baseline_upper)]
+    # 5. Extract immediate conductor baseline (93rd to 96th percentile region)
+    # Comparing peak hotspot directly to adjacent carrying conductor
+    baseline_pixels = blurred[(blurred >= np.percentile(blurred, 93)) & 
+                              (blurred <= np.percentile(blurred, 96))]
 
     if len(baseline_pixels) == 0:
-        baseline_pixels = blurred_roi
+        baseline_val = np.percentile(blurred, 90)
+    else:
+        baseline_val = np.mean(baseline_pixels)
 
-    # 6. Calculate pixel intensities
-    pixel_hotspot = np.mean(hotspot_pixels)
-    pixel_baseline = np.mean(baseline_pixels)
-    pixel_mean = np.mean(blurred_roi)
-
-    # Convert scale bounds
+    # 6. Calculate temperatures in Celsius
     scale_range = known_hot_temp - known_cold_temp
     temp_per_pixel = scale_range / 255.0
 
-    max_temp = float(known_cold_temp + (pixel_hotspot * temp_per_pixel))
-    min_temp = float(known_cold_temp + (pixel_baseline * temp_per_pixel))
-    mean_temp = float(known_cold_temp + (pixel_mean * temp_per_pixel))
+    max_temp = float(known_cold_temp + (hotspot_val * temp_per_pixel))
+    min_temp = float(known_cold_temp + (baseline_val * temp_per_pixel))
+    mean_temp = float(known_cold_temp + (np.mean(blurred) * temp_per_pixel))
 
-    # Calculate targeted localized Delta T
+    # Calculate tight micro-localized Delta T
     temp_diff = float(max_temp - min_temp)
 
-    # 7. Fault classification based on target threshold
+    # 7. Fault evaluation
     if temp_diff < threshold:
         status = "NO FAULT"
         action = "Operating within normal thermal limits."
