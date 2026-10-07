@@ -4,54 +4,40 @@ import numpy as np
 
 def analyze_thermal_image(
     image: np.ndarray,
-    known_cold_temp: float = 7.0,
-    known_hot_temp: float = 40.0,
+    known_cold_temp: float,
+    known_hot_temp: float,
     threshold: float = 5.0
 ) -> dict:
     """
-    Isolates the active carrying component to calculate localized hotspot Delta T,
-    preventing cold background air from inflating results to 25-30°C.
+    Direct pixel-intensity linear mapping against ground-truth OEM scale boundaries.
     """
-    # 1. Convert to grayscale intensity map
+    # 1. Convert image to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    # 2. Crop inner 70% ROI to remove outer camera legends, text, and side margins
+    # 2. Crop inner 80% region to remove scale bar/UI border artifacts
     h, w = gray.shape
-    roi = gray[int(h * 0.15):int(h * 0.85), int(w * 0.15):int(w * 0.85)]
+    roi = gray[int(h * 0.1):int(h * 0.9), int(w * 0.1):int(w * 0.9)]
 
-    # 3. Apply mild Gaussian blur to suppress camera noise
-    blurred = cv2.GaussianBlur(roi, (5, 5), 0)
+    # 3. Find pixel intensity extrema within the active image body
+    min_pixel = float(np.min(roi))
+    max_pixel = float(np.max(roi))
 
-    # 4. Strictly isolate active warm equipment (ignore lowest 85% of pixels representing background air/casing)
-    equipment_cutoff = np.percentile(blurred, 85)
-    equipment_pixels = blurred[blurred >= equipment_cutoff]
+    if max_pixel <= min_pixel:
+        raise ValueError("Image lacks sufficient contrast or thermal dynamic range.")
 
-    if len(equipment_pixels) < 10:
-        equipment_pixels = blurred.flatten()
+    # 4. Compute slope (deg C per intensity count) based on input scale
+    temp_per_count = (known_hot_temp - known_cold_temp) / (max_pixel - min_pixel)
 
-    # 5. Measure peak hotspot (top 0.5% intensity) vs healthy carrying conductor baseline (bottom of equipment region)
-    hotspot_pixel = np.percentile(equipment_pixels, 99.5)
-    baseline_pixel = np.percentile(equipment_pixels, 15)  # Baseline within the active conductor
-    mean_pixel = np.mean(equipment_pixels)
+    # 5. Map pixel values directly to temperatures
+    min_temp = known_cold_temp
+    max_temp = known_hot_temp
+    mean_temp = float(known_cold_temp + (np.mean(roi) - min_pixel) * temp_per_count)
 
-    # 6. Map intensity values to temperature range
-    scale_range = known_hot_temp - known_cold_temp
-    temp_per_pixel = scale_range / 255.0
-
-    max_temp = float(known_cold_temp + (hotspot_pixel * temp_per_pixel))
-    min_temp = float(known_cold_temp + (baseline_pixel * temp_per_pixel))
-    mean_temp = float(known_cold_temp + (mean_pixel * temp_per_pixel))
-
-    # Calculate micro-localized Delta T
+    # Delta T directly matches the scale delta for full-frame targets
     temp_diff = float(max_temp - min_temp)
 
-    # 7. Fault evaluation
-    if temp_diff < threshold:
-        status = "NO FAULT"
-        action = "Operating within normal thermal parameters."
-    else:
-        status = "FAULT"
-        action = "Attention required within 2 days."
+    status = "FAULT" if temp_diff >= threshold else "NO FAULT"
+    action = "Attention required within 2 days." if status == "FAULT" else "Normal operation."
 
     return {
         "min_temperature": round(min_temp, 2),
