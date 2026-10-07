@@ -1,79 +1,72 @@
-# thermal_analyzer.py
-
 import cv2
 import numpy as np
 
 
 def analyze_thermal_image(
-    image,
-    min_scale_temp,
-    max_scale_temp
-):
+    image: np.ndarray,
+    min_scale_temp: float = 7.0,
+    max_scale_temp: float = 40.0,
+    low_percentile: float = 2.0,
+    high_percentile: float = 98.0,
+    threshold: float = 5.0
+) -> dict:
     """
-    Analyze the complete thermal image.
+    Analyzes an RGB thermal image to calculate temperatures and fault status.
 
     Parameters
     ----------
     image : numpy.ndarray
-        RGB thermal image.
-
+        RGB thermal image array.
     min_scale_temp : float
-        Minimum temperature represented by the thermal color scale.
-
+        Minimum temperature corresponding to calibration scale in °C.
     max_scale_temp : float
-        Maximum temperature represented by the thermal color scale.
+        Maximum temperature corresponding to calibration scale in °C.
+    low_percentile : float
+        Lower percentile threshold to exclude noise/extreme pixels.
+    high_percentile : float
+        Upper percentile threshold to exclude noise/extreme pixels.
+    threshold : float
+        Temperature difference threshold (°C) that triggers a fault.
 
     Returns
     -------
     dict
-        Minimum temperature, maximum temperature,
-        temperature difference, mean temperature and status.
+        Dictionary containing extracted temperature metrics and fault evaluation.
     """
-
     # Convert RGB image to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    gray_float = gray.astype(np.float32)
 
-    # Convert pixel intensity to 0-1
-    normalized = gray.astype(np.float32) / 255.0
+    # Calculate percentile pixel bounds to handle noise and artifacts
+    low_pixel = np.percentile(gray_float, low_percentile)
+    high_pixel = np.percentile(gray_float, high_percentile)
 
-    # Convert intensity to temperature
-    temperature = (
-        min_scale_temp
-        + normalized * (max_scale_temp - min_scale_temp)
-    )
+    # Check for uniform or low-variation image
+    if high_pixel <= low_pixel:
+        raise ValueError(
+            "The image does not contain enough temperature variation for analysis."
+        )
 
-    # ------------------------------------------------
-    # WHOLE IMAGE ANALYSIS
-    # ------------------------------------------------
+    # Map normalized pixel values to temperature scale
+    normalized = (gray_float - low_pixel) / (high_pixel - low_pixel)
+    temperature = min_scale_temp + normalized * (max_scale_temp - min_scale_temp)
 
+    # Clip values within scale limits
+    temperature = np.clip(temperature, min_scale_temp, max_scale_temp)
+
+    # Calculate temperature stats
     min_temperature = float(np.min(temperature))
     max_temperature = float(np.max(temperature))
-
-    temperature_difference = (
-        max_temperature - min_temperature
-    )
-
+    temperature_difference = max_temperature - min_temperature
     mean_temperature = float(np.mean(temperature))
 
-    # ------------------------------------------------
-    # FAULT DECISION
-    # ------------------------------------------------
-
-    threshold = 5.0
-
+    # Fault decision logic
     if temperature_difference < threshold:
-
         status = "NO FAULT"
         action = "No immediate action required."
-
     else:
-
         status = "FAULT"
         action = "Attention required within 2 days."
-
-    # ------------------------------------------------
-    # RETURN RESULTS
-    # ------------------------------------------------
 
     return {
         "min_temperature": min_temperature,
@@ -82,5 +75,7 @@ def analyze_thermal_image(
         "mean_temperature": mean_temperature,
         "threshold": threshold,
         "status": status,
-        "action": action
+        "action": action,
+        "low_percentile": low_percentile,
+        "high_percentile": high_percentile
     }
