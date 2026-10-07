@@ -9,44 +9,50 @@ def analyze_thermal_image(
     threshold: float = 5.0
 ) -> dict:
     """
-    Measures micro-localized Delta T between peak hotspot cluster 
-    and immediate adjacent conductor baseline.
+    Dynamically extracts hotspot vs healthy component baseline across diverse
+    thermal image palettes to maintain a precise, consistent ΔT reading.
     """
-    # 1. Convert to grayscale
+    # 1. Convert to grayscale intensity map
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    # 2. Crop inner 60% ROI to focus strictly on target equipment
+    # 2. Focus on central target region (ignoring outer graphics and legends)
     h, w = gray.shape
-    roi = gray[int(h * 0.2):int(h * 0.8), int(w * 0.2):int(w * 0.8)]
+    roi = gray[int(h * 0.15):int(h * 0.85), int(w * 0.15):int(w * 0.85)]
 
-    # 3. Apply Gaussian blur to eliminate minor image noise
-    blurred = cv2.GaussianBlur(roi, (5, 5), 0)
+    # 3. Apply bilateral filter (preserves sharp hotspot edges while smoothing noise)
+    filtered = cv2.bilateralFilter(roi, d=9, sigmaColor=75, sigmaSpace=75)
 
-    # 4. Extract peak hotspot (99.5th percentile)
-    hotspot_val = np.percentile(blurred, 99.5)
+    # 4. Filter out cold ambient background (keep top 40% brightest regions)
+    background_cutoff = np.percentile(filtered, 60)
+    component_pixels = filtered[filtered >= background_cutoff]
 
-    # 5. Extract immediate conductor baseline (93rd to 96th percentile region)
-    # Comparing peak hotspot directly to adjacent carrying conductor
-    baseline_pixels = blurred[(blurred >= np.percentile(blurred, 93)) & 
-                              (blurred <= np.percentile(blurred, 96))]
+    if len(component_pixels) == 0:
+        component_pixels = filtered.flatten()
 
-    if len(baseline_pixels) == 0:
-        baseline_val = np.percentile(blurred, 90)
-    else:
-        baseline_val = np.mean(baseline_pixels)
+    # 5. Dynamic Baseline Calculation:
+    # Baseline = Mode (most frequent temperature intensity) of the active equipment
+    counts, bin_edges = np.histogram(component_pixels, bins=30)
+    max_bin_index = np.argmax(counts)
+    baseline_pixel = (bin_edges[max_bin_index] + bin_edges[max_bin_index + 1]) / 2.0
 
-    # 6. Calculate temperatures in Celsius
+    # 6. Peak Hotspot Calculation:
+    # Hotspot = Average of the top 0.5% hottest pixels
+    hotspot_cutoff = np.percentile(component_pixels, 99.5)
+    hotspot_pixels = component_pixels[component_pixels >= hotspot_cutoff]
+    hotspot_pixel = np.mean(hotspot_pixels) if len(hotspot_pixels) > 0 else np.max(component_pixels)
+
+    # 7. Convert intensities to actual Celsius scale
     scale_range = known_hot_temp - known_cold_temp
     temp_per_pixel = scale_range / 255.0
 
-    max_temp = float(known_cold_temp + (hotspot_val * temp_per_pixel))
-    min_temp = float(known_cold_temp + (baseline_val * temp_per_pixel))
-    mean_temp = float(known_cold_temp + (np.mean(blurred) * temp_per_pixel))
+    max_temp = float(known_cold_temp + (hotspot_pixel * temp_per_pixel))
+    min_temp = float(known_cold_temp + (baseline_pixel * temp_per_pixel))
+    mean_temp = float(known_cold_temp + (np.mean(component_pixels) * temp_per_pixel))
 
-    # Calculate tight micro-localized Delta T
+    # Calculate precise hotspot vs healthy component Delta T
     temp_diff = float(max_temp - min_temp)
 
-    # 7. Fault evaluation
+    # 8. Fault assessment logic
     if temp_diff < threshold:
         status = "NO FAULT"
         action = "Operating within normal thermal limits."
