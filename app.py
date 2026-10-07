@@ -1,82 +1,307 @@
-import cv2
-import numpy as np
+```python
 import streamlit as st
 from PIL import Image
+import numpy as np
 
-from thermal_analyzer import analyze_image, create_result_image
+from thermal_analyzer import analyze_thermal_image
 
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="Thermal Track Inspection",
     page_icon="🌡️",
-    layout="wide",
+    layout="centered"
 )
+
+
+# ============================================================
+# TITLE
+# ============================================================
 
 st.title("🌡️ Thermal Track Inspection")
+
 st.write(
-    "Upload a thermal image. P1, P2 and the temperature scale "
-    "are detected automatically."
+    "Upload a thermal image of the railway track. "
+    "The system automatically reads the P1 and P2 "
+    "temperature readings and checks for a fault."
 )
 
-uploaded = st.file_uploader(
-    "Upload thermal image",
-    type=["jpg", "jpeg", "png"],
+st.divider()
+
+
+# ============================================================
+# IMAGE UPLOAD
+# ============================================================
+
+uploaded_file = st.file_uploader(
+    "Upload Thermal Image",
+    type=["jpg", "jpeg", "png"]
 )
 
-if uploaded is not None:
-    pil_image = Image.open(uploaded).convert("RGB")
-    image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
-    st.subheader("Uploaded Image")
-    st.image(pil_image, use_container_width=True)
+if uploaded_file is not None:
 
-    if st.button("🔍 Analyze Image", type="primary", use_container_width=True):
-        with st.spinner("Detecting P1, P2 and temperature scale..."):
-            try:
-                result = analyze_image(image)
+    # --------------------------------------------------------
+    # Load image
+    # --------------------------------------------------------
 
-                st.success("Analysis completed successfully.")
+    image = Image.open(
+        uploaded_file
+    ).convert("RGB")
 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("P1 Temperature", f"{result['P1_temperature']:.2f} °C")
-                c2.metric("P2 Temperature", f"{result['P2_temperature']:.2f} °C")
-                c3.metric("Difference", f"{result['difference']:.2f} °C")
+    st.subheader("Uploaded Thermal Image")
+
+    st.image(
+        image,
+        caption=uploaded_file.name,
+        use_container_width=True
+    )
+
+    st.divider()
+
+
+    # ========================================================
+    # ANALYZE BUTTON
+    # ========================================================
+
+    if st.button(
+        "🔍 Analyze Image",
+        type="primary",
+        use_container_width=True
+    ):
+
+        with st.spinner(
+            "Automatically reading P1 and P2 temperatures..."
+        ):
+
+            result = analyze_thermal_image(
+                np.array(image)
+            )
+
+
+        # ====================================================
+        # ANALYSIS FAILED
+        # ====================================================
+
+        if not result["success"]:
+
+            st.error(
+                "❌ Analysis could not be completed."
+            )
+
+            st.warning(
+                result["message"]
+            )
+
+            st.info(
+                "Make sure the P1 and P2 temperature "
+                "readings are clearly visible in the image."
+            )
+
+            # OCR debugging information
+            if result.get("ocr_text"):
+
+                with st.expander(
+                    "Show OCR information"
+                ):
+
+                    st.code(
+                        result["ocr_text"]
+                    )
+
+
+        # ====================================================
+        # ANALYSIS SUCCESSFUL
+        # ====================================================
+
+        else:
+
+            st.success(
+                "✅ Analysis completed successfully."
+            )
+
+            st.divider()
+
+
+            # =================================================
+            # P1 / P2 / DIFFERENCE
+            # =================================================
+
+            st.subheader(
+                "Temperature Readings"
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+
+            with col1:
+
+                st.metric(
+                    "P1 Temperature",
+                    f'{result["p1"]:.1f} °C'
+                )
+
+
+            with col2:
+
+                st.metric(
+                    "P2 Temperature",
+                    f'{result["p2"]:.1f} °C'
+                )
+
+
+            with col3:
+
+                st.metric(
+                    "Difference",
+                    f'{result["difference"]:.1f} °C'
+                )
+
+
+            st.divider()
+
+
+            # =================================================
+            # MINIMUM / MAXIMUM
+            # =================================================
+
+            st.subheader(
+                "Temperature Summary"
+            )
+
+            col1, col2 = st.columns(2)
+
+
+            with col1:
+
+                st.metric(
+                    "Minimum Temperature",
+                    f'{result["minimum"]:.1f} °C'
+                )
+
+
+            with col2:
+
+                st.metric(
+                    "Maximum Temperature",
+                    f'{result["maximum"]:.1f} °C'
+                )
+
+
+            st.divider()
+
+
+            # =================================================
+            # FAULT DECISION
+            # =================================================
+
+            difference = result["difference"]
+
+
+            if difference < 5.0:
+
+                st.success(
+                    "✅ NO FAULT DETECTED"
+                )
 
                 st.write(
-                    f"**Detected scale:** {result['scale_bottom']:.1f} °C "
-                    f"to {result['scale_top']:.1f} °C"
+                    f"The temperature difference is "
+                    f"**{difference:.1f} °C**, which is "
+                    f"less than the **5 °C threshold**."
                 )
 
-                if result["difference"] < 5:
-                    st.success(
-                        f"✅ **{result['status']}** — {result['action']}"
-                    )
-                else:
-                    st.error(
-                        f"⚠️ **{result['status']}** — {result['action']}"
-                    )
-
-                annotated = create_result_image(image, result)
-                annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-
-                st.subheader("Automatic Detection")
-                st.image(
-                    annotated_rgb,
-                    caption="Detected P1 and P2",
-                    use_container_width=True,
+                st.info(
+                    "No immediate attention is required."
                 )
 
-                ok, encoded = cv2.imencode(".jpg", annotated)
-                if ok:
-                    st.download_button(
-                        "⬇️ Download Result Image",
-                        data=encoded.tobytes(),
-                        file_name="thermal_track_result.jpg",
-                        mime="image/jpeg",
+
+            else:
+
+                st.error(
+                    "⚠️ FAULT DETECTED"
+                )
+
+                st.write(
+                    f"The temperature difference is "
+                    f"**{difference:.1f} °C**, which is "
+                    f"greater than or equal to the "
+                    f"**5 °C threshold**."
+                )
+
+                st.warning(
+                    "Attention is required within 2 days."
+                )
+
+
+            st.divider()
+
+
+            # =================================================
+            # DETAILED RESULT
+            # =================================================
+
+            st.subheader(
+                "Analysis Details"
+            )
+
+            st.write(
+                f'**P1:** {result["p1"]:.1f} °C'
+            )
+
+            st.write(
+                f'**P2:** {result["p2"]:.1f} °C'
+            )
+
+            st.write(
+                f'**Minimum:** {result["minimum"]:.1f} °C'
+            )
+
+            st.write(
+                f'**Maximum:** {result["maximum"]:.1f} °C'
+            )
+
+            st.write(
+                f'**Difference:** {result["difference"]:.1f} °C'
+            )
+
+
+            # =================================================
+            # TEMPERATURE SCALE
+            # =================================================
+
+            if result.get("temperature_scale"):
+
+                top, bottom = (
+                    result["temperature_scale"]
+                )
+
+                st.caption(
+                    f"Detected temperature scale: "
+                    f"{top:.1f} °C to {bottom:.1f} °C"
+                )
+
+
+            # =================================================
+            # OCR DEBUGGING
+            # =================================================
+
+            if result.get("ocr_text"):
+
+                with st.expander(
+                    "OCR information"
+                ):
+
+                    st.code(
+                        result["ocr_text"]
                     )
 
-            except Exception as e:
-                st.error("Automatic analysis could not be completed for this image.")
-                st.warning(str(e))
+
 else:
-    st.info("Upload a thermal image to begin.")
+
+    st.info(
+        "Please upload a thermal image to begin."
+    )
+```
