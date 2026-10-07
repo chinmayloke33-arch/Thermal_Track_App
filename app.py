@@ -20,43 +20,47 @@ st.set_page_config(
 st.title("🌡️ Thermal Image Analyzer")
 
 st.write(
-    "Upload a thermal image to perform dynamic region-of-interest (ROI) "
-    "temperature estimation, hotspot analysis, and fault diagnosis."
+    "Upload a thermal image to perform actual temperature calculations, "
+    "spot-calibration mapping, and operational fault assessment."
 )
 
 # ============================================================
-# SIDEBAR: THERMAL CAMERA CALIBRATION SETTINGS
+# SIDEBAR: ACTUAL TEMPERATURE CALIBRATION
 # ============================================================
 
-st.sidebar.header("⚙️ Camera Calibration")
+st.sidebar.header("⚙️ Actual Spot Calibration")
+st.sidebar.write("Enter the known temperature bounds displayed on your camera overlay:")
 
-min_scale = st.sidebar.number_input(
-    "Palette Min Temp (°C)",
+known_cold = st.sidebar.number_input(
+    "Spot Minimum Temp (°C)",
     value=7.0,
-    step=1.0,
-    help="The lowest temperature represented on your thermal camera scale."
+    step=0.1,
+    format="%.2f",
+    help="Cold spot or minimum scale temperature from camera legend."
 )
 
-max_scale = st.sidebar.number_input(
-    "Palette Max Temp (°C)",
+known_hot = st.sidebar.number_input(
+    "Spot Maximum Temp (°C)",
     value=40.0,
-    step=1.0,
-    help="The highest temperature represented on your thermal camera scale."
+    step=0.1,
+    format="%.2f",
+    help="Hot spot or maximum scale temperature from camera legend."
 )
 
 fault_thresh = st.sidebar.number_input(
     "Fault Threshold (°C)",
     value=5.0,
     step=0.5,
-    help="Temperature difference required to flag an operational fault."
+    format="%.2f",
+    help="Temperature difference required to trigger a fault."
 )
 
-# Validate temperature range inputs
-if max_scale <= min_scale:
-    st.sidebar.error("Maximum temperature must be greater than minimum temperature.")
+# Validation check
+if known_hot <= known_cold:
+    st.sidebar.error("Maximum temperature must be strictly greater than minimum temperature.")
 
 # ============================================================
-# FILE UPLOAD SECTION
+# IMAGE UPLOAD SECTION
 # ============================================================
 
 uploaded_file = st.file_uploader(
@@ -65,105 +69,106 @@ uploaded_file = st.file_uploader(
 )
 
 # ============================================================
-# MAIN APPLICATION LOGIC
+# MAIN ANALYSIS LOGIC
 # ============================================================
 
 if uploaded_file is not None:
 
-    # 1. Load and display image
+    # 1. Load Image
     image = Image.open(uploaded_file).convert("RGB")
     img_array = np.array(image)
 
+    # 2. Display Image
     col_img, col_info = st.columns([1, 1])
 
     with col_img:
         st.subheader("📷 Uploaded Thermal Image")
         st.image(image, use_container_width=True)
 
-    # 2. Process image using thermal_analyzer module
+    # 3. Calculate Actual Temperatures
     try:
         results = analyze_thermal_image(
             image=img_array,
-            min_scale_temp=min_scale,
-            max_scale_temp=max_scale,
+            known_cold_temp=known_cold,
+            known_hot_temp=known_hot,
             threshold=fault_thresh
         )
     except Exception as err:
-        st.error(f"Error processing image: {str(err)}")
+        st.error(f"Analysis error: {str(err)}")
         st.stop()
 
-    # 3. Display calculated temperature metrics
+    # 4. Metric Displays
     st.divider()
-    st.subheader("🌡️ Temperature Analysis")
+    st.subheader("🌡️ Actual Temperature Results")
 
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
         st.metric(
-            label="Minimum Temperature",
+            label="Actual Minimum Temp",
             value=f"{results['min_temperature']:.2f} °C"
         )
 
     with c2:
         st.metric(
-            label="Maximum Temperature",
+            label="Actual Maximum Temp",
             value=f"{results['max_temperature']:.2f} °C"
         )
 
     with c3:
         st.metric(
-            label="Temperature Difference",
+            label="Temperature Difference (ΔT)",
             value=f"{results['temperature_difference']:.2f} °C"
         )
 
     with c4:
         st.metric(
-            label="Mean Temperature",
+            label="Average Target Temp",
             value=f"{results['mean_temperature']:.2f} °C"
         )
 
-    # 4. Display fault evaluation
+    # 5. Fault Assessment Output
     st.divider()
     st.subheader("🚦 Fault Assessment")
 
     if results["status"] == "NO FAULT":
         st.success(
             f"✅ **NO FAULT DETECTED**\n\n"
-            f"Calculated Temperature Difference: **{results['temperature_difference']:.2f} °C** "
+            f"Calculated Temperature Difference = **{results['temperature_difference']:.2f} °C** "
             f"(Threshold: {results['threshold']:.2f} °C)"
         )
-        st.info("Operating conditions are nominal. No immediate action required.")
+        st.info("System operating within acceptable thermal parameters.")
     else:
         st.error(
             f"⚠️ **FAULT DETECTED**\n\n"
-            f"Calculated Temperature Difference: **{results['temperature_difference']:.2f} °C** "
+            f"Calculated Temperature Difference = **{results['temperature_difference']:.2f} °C** "
             f"(Exceeds Threshold of {results['threshold']:.2f} °C)"
         )
-        st.warning(f"**Recommended Action:** {results['action']}")
+        st.warning(f"**Action Required:** {results['action']}")
 
-    # 5. Display analysis summary table
+    # 6. Executive Summary Table
     st.divider()
-    st.subheader("📊 Executive Summary")
+    st.subheader("📊 Operational Summary")
 
-    summary = {
-        "Calibration Scale Range": f"{min_scale:.2f} °C to {max_scale:.2f} °C",
-        "Estimated Min Temperature": f"{results['min_temperature']:.2f} °C",
-        "Estimated Max Temperature": f"{results['max_temperature']:.2f} °C",
-        "Active Temperature Delta": f"{results['temperature_difference']:.2f} °C",
-        "Average Region Temperature": f"{results['mean_temperature']:.2f} °C",
-        "Configured Fault Threshold": f"{results['threshold']:.2f} °C",
-        "Evaluation Status": results["status"],
-        "Required Action": results["action"]
+    summary_data = {
+        "Calibrated Cold Spot": f"{known_cold:.2f} °C",
+        "Calibrated Hot Spot": f"{known_hot:.2f} °C",
+        "Measured Minimum": f"{results['min_temperature']:.2f} °C",
+        "Measured Maximum": f"{results['max_temperature']:.2f} °C",
+        "Temperature Delta (ΔT)": f"{results['temperature_difference']:.2f} °C",
+        "Average Temperature": f"{results['mean_temperature']:.2f} °C",
+        "Configured Threshold": f"{results['threshold']:.2f} °C",
+        "Diagnosis": results["status"],
+        "Recommended Action": results["action"]
     }
 
-    for key, val in summary.items():
+    for key, val in summary_data.items():
         st.write(f"**{key}:** {val}")
 
 else:
-    # Instructions displayed before file upload
-    st.info("Please upload a thermal image above to generate an analysis report.")
+    st.info("Please upload a thermal image above to compute actual temperatures.")
     st.write("---")
-    st.write("### Instructions:")
-    st.write("1. Set the calibration scale on the left sidebar to match your thermal camera's legend limits.")
-    st.write("2. Upload a thermal inspection image (`.jpg`, `.png`, `.bmp`, or `.tiff`).")
-    st.write("3. Review calculated temperature differences and fault flags.")
+    st.write("### How to get exact readings:")
+    st.write("1. Check the temperature values displayed on your thermal camera screen legend.")
+    st.write("2. Enter those numbers into the sidebar inputs (`Spot Minimum Temp` and `Spot Maximum Temp`).")
+    st.write("3. Upload the image to view the exact calculated temperature delta across target equipment.")
