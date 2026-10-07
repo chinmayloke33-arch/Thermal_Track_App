@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 from PIL import Image
 import numpy as np
@@ -204,4 +204,4 @@ if uploaded_file is not None:
         st.write(
             f"**{key}:** {value}"
         )
-```
+
