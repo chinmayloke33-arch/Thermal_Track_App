@@ -1,7 +1,6 @@
 streamlit
 numpy
-opencv-python-headless
 pillow
-loguru
-flirimageextractor
+opencv-python-headless
+streamlit-cropper
 
