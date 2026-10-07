@@ -304,4 +304,4 @@ else:
     st.info(
         "Please upload a thermal image to begin."
     )
-```
+
