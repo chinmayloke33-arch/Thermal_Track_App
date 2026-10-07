@@ -1,6 +1,7 @@
 import streamlit as st
 from PIL import Image
 import numpy as np
+from streamlit_cropper import st_cropper
 from thermal_analyzer import analyze_thermal_image
 
 # ============================================================
@@ -13,38 +14,32 @@ st.set_page_config(
     layout="wide"
 )
 
-# ============================================================
-# APPLICATION TITLE & DESCRIPTION
-# ============================================================
-
 st.title("🌡️ Thermal Image Analyzer")
-
 st.write(
-    "Upload a thermal image to perform actual temperature calculations, "
-    "spot-calibration mapping, and operational fault assessment."
+    "Upload a thermal image, crop directly around the active conductor or target asset "
+    "(excluding legends/background), and analyze localized $\Delta T$."
 )
 
 # ============================================================
-# SIDEBAR: ACTUAL TEMPERATURE CALIBRATION
+# SIDEBAR CALIBRATION
 # ============================================================
 
-st.sidebar.header("⚙️ Actual Spot Calibration")
-st.sidebar.write("Enter the known temperature bounds displayed on your camera overlay:")
+st.sidebar.header("⚙️ OEM Scale Calibration")
 
 known_cold = st.sidebar.number_input(
-    "Spot Minimum Temp (°C)",
+    "Scale Min Temp (°C)",
     value=7.0,
     step=0.1,
     format="%.2f",
-    help="Cold spot or minimum scale temperature from camera legend."
+    help="Minimum temperature printed on camera legend."
 )
 
 known_hot = st.sidebar.number_input(
-    "Spot Maximum Temp (°C)",
+    "Scale Max Temp (°C)",
     value=40.0,
     step=0.1,
     format="%.2f",
-    help="Hot spot or maximum scale temperature from camera legend."
+    help="Maximum temperature printed on camera legend."
 )
 
 fault_thresh = st.sidebar.number_input(
@@ -55,12 +50,11 @@ fault_thresh = st.sidebar.number_input(
     help="Temperature difference required to trigger a fault."
 )
 
-# Validation check
 if known_hot <= known_cold:
-    st.sidebar.error("Maximum temperature must be strictly greater than minimum temperature.")
+    st.sidebar.error("Maximum temperature must be greater than minimum temperature.")
 
 # ============================================================
-# IMAGE UPLOAD SECTION
+# FILE UPLOAD & CROPPING INTERFACE
 # ============================================================
 
 uploaded_file = st.file_uploader(
@@ -68,24 +62,32 @@ uploaded_file = st.file_uploader(
     type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"]
 )
 
-# ============================================================
-# MAIN ANALYSIS LOGIC
-# ============================================================
-
 if uploaded_file is not None:
-
-    # 1. Load Image
     image = Image.open(uploaded_file).convert("RGB")
-    img_array = np.array(image)
 
-    # 2. Display Image
-    col_img, col_info = st.columns([1, 1])
+    st.write("---")
+    st.subheader("✂️ Interactive Component Selection")
+    st.caption("Drag and adjust the red box to highlight the target component (e.g. connector, joint, rail element).")
 
-    with col_img:
-        st.subheader("📷 Uploaded Thermal Image")
-        st.image(image, use_container_width=True)
+    col_crop, col_preview = st.columns([1.2, 0.8])
 
-    # 3. Calculate Actual Temperatures
+    with col_crop:
+        # Interactive cropping widget
+        cropped_img = st_cropper(
+            image,
+            realtime_update=True,
+            box_color="#FF0000",
+            aspect_ratio=None,
+            key="thermal_cropper"
+        )
+
+    with col_preview:
+        st.subheader("Selected Region Preview")
+        st.image(cropped_img, use_container_width=True)
+
+    # Process selected ROI
+    img_array = np.array(cropped_img)
+
     try:
         results = analyze_thermal_image(
             image=img_array,
@@ -97,78 +99,40 @@ if uploaded_file is not None:
         st.error(f"Analysis error: {str(err)}")
         st.stop()
 
-    # 4. Metric Displays
+    # ============================================================
+    # RESULTS DISPLAY
+    # ============================================================
+
     st.divider()
-    st.subheader("🌡️ Actual Temperature Results")
+    st.subheader("🌡️ Localized Temperature Results")
 
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        st.metric(
-            label="Actual Minimum Temp",
-            value=f"{results['min_temperature']:.2f} °C"
-        )
-
+        st.metric("ROI Minimum Temp", f"{results['min_temperature']:.2f} °C")
     with c2:
-        st.metric(
-            label="Actual Maximum Temp",
-            value=f"{results['max_temperature']:.2f} °C"
-        )
-
+        st.metric("ROI Maximum Temp", f"{results['max_temperature']:.2f} °C")
     with c3:
-        st.metric(
-            label="Temperature Difference (ΔT)",
-            value=f"{results['temperature_difference']:.2f} °C"
-        )
-
+        st.metric("Temperature Delta (ΔT)", f"{results['temperature_difference']:.2f} °C")
     with c4:
-        st.metric(
-            label="Average Target Temp",
-            value=f"{results['mean_temperature']:.2f} °C"
-        )
+        st.metric("ROI Mean Temp", f"{results['mean_temperature']:.2f} °C")
 
-    # 5. Fault Assessment Output
     st.divider()
-    st.subheader("🚦 Fault Assessment")
+    st.subheader("🚦 Fault Diagnosis")
 
     if results["status"] == "NO FAULT":
         st.success(
             f"✅ **NO FAULT DETECTED**\n\n"
-            f"Calculated Temperature Difference = **{results['temperature_difference']:.2f} °C** "
+            f"Calculated $\Delta T$ = **{results['temperature_difference']:.2f} °C** "
             f"(Threshold: {results['threshold']:.2f} °C)"
         )
-        st.info("System operating within acceptable thermal parameters.")
     else:
         st.error(
             f"⚠️ **FAULT DETECTED**\n\n"
-            f"Calculated Temperature Difference = **{results['temperature_difference']:.2f} °C** "
+            f"Calculated $\Delta T$ = **{results['temperature_difference']:.2f} °C** "
             f"(Exceeds Threshold of {results['threshold']:.2f} °C)"
         )
-        st.warning(f"**Action Required:** {results['action']}")
-
-    # 6. Executive Summary Table
-    st.divider()
-    st.subheader("📊 Operational Summary")
-
-    summary_data = {
-        "Calibrated Cold Spot": f"{known_cold:.2f} °C",
-        "Calibrated Hot Spot": f"{known_hot:.2f} °C",
-        "Measured Minimum": f"{results['min_temperature']:.2f} °C",
-        "Measured Maximum": f"{results['max_temperature']:.2f} °C",
-        "Temperature Delta (ΔT)": f"{results['temperature_difference']:.2f} °C",
-        "Average Temperature": f"{results['mean_temperature']:.2f} °C",
-        "Configured Threshold": f"{results['threshold']:.2f} °C",
-        "Diagnosis": results["status"],
-        "Recommended Action": results["action"]
-    }
-
-    for key, val in summary_data.items():
-        st.write(f"**{key}:** {val}")
+        st.warning(f"**Recommended Action:** {results['action']}")
 
 else:
-    st.info("Please upload a thermal image above to compute actual temperatures.")
-    st.write("---")
-    st.write("### How to get exact readings:")
-    st.write("1. Check the temperature values displayed on your thermal camera screen legend.")
-    st.write("2. Enter those numbers into the sidebar inputs (`Spot Minimum Temp` and `Spot Maximum Temp`).")
-    st.write("3. Upload the image to view the exact calculated temperature delta across target equipment.")
+    st.info("Upload a thermal image above to begin interactive ROI analysis.")
