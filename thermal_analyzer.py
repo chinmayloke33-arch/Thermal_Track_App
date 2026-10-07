@@ -9,34 +9,46 @@ def analyze_thermal_image(
     threshold: float = 5.0
 ) -> dict:
     """
-    Maps image pixel intensities linearly based on two verified spot temperature measurements.
+    Analyzes actual thermal variation by ignoring scale bars and cropping to 
+    the active thermal target area.
     """
-    # Convert RGB to grayscale
+    # 1. Convert RGB to grayscale intensity map
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    # Filter out extreme outer margin text and legends
+    # 2. Crop out thermal camera side legends/scale bars (crop 15% inner border)
     h, w = gray.shape
-    roi = gray[int(h * 0.05):int(h * 0.95), int(w * 0.05):int(w * 0.95)]
+    roi = gray[int(h * 0.15):int(h * 0.85), int(w * 0.15):int(w * 0.85)]
 
-    min_pixel = float(np.min(roi))
-    max_pixel = float(np.max(roi))
+    # 3. Filter out cold background noise (ignore pixels below 10th percentile)
+    valid_pixels = roi[roi > np.percentile(roi, 10)]
 
-    if max_pixel <= min_pixel:
-        raise ValueError("Image lacks sufficient thermal variation for analysis.")
+    if len(valid_pixels) == 0:
+        valid_pixels = roi.flatten()
 
-    # Calculate scale factor per pixel unit
-    temp_per_unit = (known_hot_temp - known_cold_temp) / (max_pixel - min_pixel)
+    # 4. Use 5th percentile as ambient equipment reference and 95th as hotspot
+    pixel_ambient = np.percentile(valid_pixels, 5)
+    pixel_hotspot = np.percentile(valid_pixels, 95)
+    pixel_mean = np.mean(valid_pixels)
 
-    # Convert entire ROI array to actual Celsius
-    actual_temperatures = known_cold_temp + (roi - min_pixel) * temp_per_unit
+    # Scale factor per pixel intensity unit based on full scale bounds
+    scale_range = known_hot_temp - known_cold_temp
+    temp_per_pixel = scale_range / 255.0
 
-    min_temp = float(np.min(actual_temperatures))
-    max_temp = float(np.max(actual_temperatures))
-    mean_temp = float(np.mean(actual_temperatures))
-    temp_diff = max_temp - min_temp
+    # 5. Convert pixel intensities to actual temperatures
+    min_temp = float(known_cold_temp + (pixel_ambient * temp_per_pixel))
+    max_temp = float(known_cold_temp + (pixel_hotspot * temp_per_pixel))
+    mean_temp = float(known_cold_temp + (pixel_mean * temp_per_pixel))
 
-    status = "FAULT" if temp_diff >= threshold else "NO FAULT"
-    action = "Attention required within 2 days." if status == "FAULT" else "Normal operation."
+    # Calculate actual hotspot vs ambient temperature delta
+    temp_diff = float(max_temp - min_temp)
+
+    # 6. Fault decision
+    if temp_diff < threshold:
+        status = "NO FAULT"
+        action = "No immediate action required."
+    else:
+        status = "FAULT"
+        action = "Attention required within 2 days."
 
     return {
         "min_temperature": round(min_temp, 2),
