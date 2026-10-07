@@ -6,62 +6,45 @@ def analyze_thermal_image(
     image: np.ndarray,
     min_scale_temp: float = 7.0,
     max_scale_temp: float = 40.0,
-    low_percentile: float = 2.0,
-    high_percentile: float = 98.0,
     threshold: float = 5.0
 ) -> dict:
     """
-    Analyzes an RGB thermal image to calculate temperatures and fault status.
-
-    Parameters
-    ----------
-    image : numpy.ndarray
-        RGB thermal image array.
-    min_scale_temp : float
-        Minimum temperature corresponding to calibration scale in °C.
-    max_scale_temp : float
-        Maximum temperature corresponding to calibration scale in °C.
-    low_percentile : float
-        Lower percentile threshold to exclude noise/extreme pixels.
-    high_percentile : float
-        Upper percentile threshold to exclude noise/extreme pixels.
-    threshold : float
-        Temperature difference threshold (°C) that triggers a fault.
-
-    Returns
-    -------
-    dict
-        Dictionary containing extracted temperature metrics and fault evaluation.
+    Analyzes thermal images by extracting lightness intensity across HSV color space.
     """
-    # Convert RGB image to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    gray_float = gray.astype(np.float32)
+    # 1. Convert RGB to HSV to capture hue and value (brightness) accurately
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    
+    # Extract Value (brightness) and Saturation components
+    v_channel = hsv[:, :, 2].astype(np.float32)
+    s_channel = hsv[:, :, 1].astype(np.float32)
 
-    # Calculate percentile pixel bounds to handle noise and artifacts
-    low_pixel = np.percentile(gray_float, low_percentile)
-    high_pixel = np.percentile(gray_float, high_percentile)
+    # Combine Value and Saturation to avoid colorbar text or dark background artifacts
+    thermal_intensity = v_channel * (s_channel / 255.0)
 
-    # Check for uniform or low-variation image
-    if high_pixel <= low_pixel:
-        raise ValueError(
-            "The image does not contain enough temperature variation for analysis."
-        )
+    # 2. Extract relative pixel intensity range (excluding top/bottom 1% extremes)
+    p_min = np.percentile(thermal_intensity, 1)
+    p_max = np.percentile(thermal_intensity, 99)
 
-    # Map normalized pixel values to temperature scale
-    normalized = (gray_float - low_pixel) / (high_pixel - low_pixel)
-    temperature = min_scale_temp + normalized * (max_scale_temp - min_scale_temp)
+    if p_max <= p_min:
+        raise ValueError("Image lacks sufficient thermal variation for analysis.")
 
-    # Clip values within scale limits
-    temperature = np.clip(temperature, min_scale_temp, max_scale_temp)
+    # 3. Normalize intensity mapping
+    normalized = np.clip((thermal_intensity - p_min) / (p_max - p_min), 0.0, 1.0)
 
-    # Calculate temperature stats
-    min_temperature = float(np.min(temperature))
-    max_temperature = float(np.max(temperature))
-    temperature_difference = max_temperature - min_temperature
-    mean_temperature = float(np.mean(temperature))
+    # 4. Map to target temperature range
+    temperature_map = min_scale_temp + normalized * (max_scale_temp - min_scale_temp)
 
-    # Fault decision logic
-    if temperature_difference < threshold:
+    # 5. Calculate statistics from valid region (ignoring background black padding)
+    mask = thermal_intensity > np.percentile(thermal_intensity, 5)
+    valid_temps = temperature_map[mask] if np.any(mask) else temperature_map
+
+    min_temp = float(np.min(valid_temps))
+    max_temp = float(np.max(valid_temps))
+    mean_temp = float(np.mean(valid_temps))
+    temp_diff = max_temp - min_temp
+
+    # 6. Fault assessment logic
+    if temp_diff < threshold:
         status = "NO FAULT"
         action = "No immediate action required."
     else:
@@ -69,13 +52,11 @@ def analyze_thermal_image(
         action = "Attention required within 2 days."
 
     return {
-        "min_temperature": min_temperature,
-        "max_temperature": max_temperature,
-        "temperature_difference": temperature_difference,
-        "mean_temperature": mean_temperature,
+        "min_temperature": min_temp,
+        "max_temperature": max_temp,
+        "temperature_difference": temp_diff,
+        "mean_temperature": mean_temp,
         "threshold": threshold,
         "status": status,
-        "action": action,
-        "low_percentile": low_percentile,
-        "high_percentile": high_percentile
+        "action": action
     }
