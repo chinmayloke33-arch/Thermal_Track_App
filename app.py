@@ -1,7 +1,7 @@
 import streamlit as st
 from PIL import Image
 import numpy as np
-import cv2
+from thermal_analyzer import analyze_thermal_image
 
 # ============================================================
 # PAGE CONFIGURATION
@@ -14,251 +14,156 @@ st.set_page_config(
 )
 
 # ============================================================
-# APPLICATION TITLE
+# APPLICATION TITLE & DESCRIPTION
 # ============================================================
 
 st.title("🌡️ Thermal Image Analyzer")
 
 st.write(
-    "Upload a thermal image to calculate the minimum temperature, "
-    "maximum temperature, temperature difference, and fault status."
+    "Upload a thermal image to perform dynamic region-of-interest (ROI) "
+    "temperature estimation, hotspot analysis, and fault diagnosis."
 )
 
 # ============================================================
-# TEMPERATURE SETTINGS
+# SIDEBAR: THERMAL CAMERA CALIBRATION SETTINGS
 # ============================================================
 
-# Calibration range based on Electrical Department reference settings
-MIN_TEMPERATURE = 7.0
-MAX_TEMPERATURE = 40.0
+st.sidebar.header("⚙️ Camera Calibration")
 
-# Fault threshold in °C
-FAULT_THRESHOLD = 5.0
+min_scale = st.sidebar.number_input(
+    "Palette Min Temp (°C)",
+    value=7.0,
+    step=1.0,
+    help="The lowest temperature represented on your thermal camera scale."
+)
 
-# Percentiles used to remove extreme image pixels
-LOW_PERCENTILE = 2
-HIGH_PERCENTILE = 98
+max_scale = st.sidebar.number_input(
+    "Palette Max Temp (°C)",
+    value=40.0,
+    step=1.0,
+    help="The highest temperature represented on your thermal camera scale."
+)
+
+fault_thresh = st.sidebar.number_input(
+    "Fault Threshold (°C)",
+    value=5.0,
+    step=0.5,
+    help="Temperature difference required to flag an operational fault."
+)
+
+# Validate temperature range inputs
+if max_scale <= min_scale:
+    st.sidebar.error("Maximum temperature must be greater than minimum temperature.")
 
 # ============================================================
-# IMAGE UPLOAD
+# FILE UPLOAD SECTION
 # ============================================================
 
 uploaded_file = st.file_uploader(
-    "Upload thermal image",
-    type=[
-        "jpg",
-        "jpeg",
-        "png",
-        "bmp",
-        "tif",
-        "tiff"
-    ]
+    "Upload Thermal Image",
+    type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"]
 )
 
 # ============================================================
-# MAIN ANALYSIS
+# MAIN APPLICATION LOGIC
 # ============================================================
 
 if uploaded_file is not None:
 
-    # --------------------------------------------------------
-    # READ IMAGE
-    # --------------------------------------------------------
-
+    # 1. Load and display image
     image = Image.open(uploaded_file).convert("RGB")
-    img = np.array(image)
+    img_array = np.array(image)
 
-    # --------------------------------------------------------
-    # DISPLAY IMAGE
-    # --------------------------------------------------------
+    col_img, col_info = st.columns([1, 1])
 
-    st.subheader("📷 Uploaded Thermal Image")
-    st.image(
-        image,
-        use_container_width=True
-    )
+    with col_img:
+        st.subheader("📷 Uploaded Thermal Image")
+        st.image(image, use_container_width=True)
 
-    # ========================================================
-    # IMAGE PROCESSING
-    # ========================================================
-
-    # Convert RGB image to grayscale
-    gray = cv2.cvtColor(
-        img,
-        cv2.COLOR_RGB2GRAY
-    )
-
-    # Convert pixels to floating point
-    gray_float = gray.astype(np.float32)
-
-    # --------------------------------------------------------
-    # REMOVE EXTREME PIXELS
-    # --------------------------------------------------------
-    # Instead of using the absolute darkest and brightest pixels,
-    # use the 2nd and 98th percentile to avoid border or noise artifacts.
-    # --------------------------------------------------------
-
-    low_pixel = np.percentile(
-        gray_float,
-        LOW_PERCENTILE
-    )
-
-    high_pixel = np.percentile(
-        gray_float,
-        HIGH_PERCENTILE
-    )
-
-    # Prevent division by zero
-    if high_pixel <= low_pixel:
-        st.error(
-            "The uploaded image does not contain enough "
-            "temperature variation for analysis."
+    # 2. Process image using thermal_analyzer module
+    try:
+        results = analyze_thermal_image(
+            image=img_array,
+            min_scale_temp=min_scale,
+            max_scale_temp=max_scale,
+            threshold=fault_thresh
         )
+    except Exception as err:
+        st.error(f"Error processing image: {str(err)}")
         st.stop()
 
-    # ========================================================
-    # CONVERT IMAGE VALUES TO TEMPERATURE
-    # ========================================================
-
-    temperature = (
-        MIN_TEMPERATURE
-        + (
-            (gray_float - low_pixel)
-            / (high_pixel - low_pixel)
-        )
-        * (MAX_TEMPERATURE - MIN_TEMPERATURE)
-    )
-
-    # Keep temperature inside the selected range
-    temperature = np.clip(
-        temperature,
-        MIN_TEMPERATURE,
-        MAX_TEMPERATURE
-    )
-
-    # ========================================================
-    # TEMPERATURE CALCULATIONS
-    # ========================================================
-
-    min_temp = float(np.min(temperature))
-    max_temp = float(np.max(temperature))
-    mean_temp = float(np.mean(temperature))
-    difference = max_temp - min_temp
-
-    # ========================================================
-    # TEMPERATURE RESULTS
-    # ========================================================
-
+    # 3. Display calculated temperature metrics
     st.divider()
-    st.subheader("🌡️ Temperature Results")
+    st.subheader("🌡️ Temperature Analysis")
 
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
         st.metric(
-            "Minimum Temperature",
-            f"{min_temp:.2f} °C"
+            label="Minimum Temperature",
+            value=f"{results['min_temperature']:.2f} °C"
         )
 
     with c2:
         st.metric(
-            "Maximum Temperature",
-            f"{max_temp:.2f} °C"
+            label="Maximum Temperature",
+            value=f"{results['max_temperature']:.2f} °C"
         )
 
     with c3:
         st.metric(
-            "Temperature Difference",
-            f"{difference:.2f} °C"
+            label="Temperature Difference",
+            value=f"{results['temperature_difference']:.2f} °C"
         )
 
     with c4:
         st.metric(
-            "Mean Temperature",
-            f"{mean_temp:.2f} °C"
+            label="Mean Temperature",
+            value=f"{results['mean_temperature']:.2f} °C"
         )
 
-    # ========================================================
-    # FAULT ASSESSMENT
-    # ========================================================
-
+    # 4. Display fault evaluation
     st.divider()
     st.subheader("🚦 Fault Assessment")
 
-    if difference < FAULT_THRESHOLD:
+    if results["status"] == "NO FAULT":
         st.success(
-            f"✅ NO FAULT\n\n"
-            f"Temperature difference = {difference:.2f} °C"
+            f"✅ **NO FAULT DETECTED**\n\n"
+            f"Calculated Temperature Difference: **{results['temperature_difference']:.2f} °C** "
+            f"(Threshold: {results['threshold']:.2f} °C)"
         )
-        st.write("**Status:** No fault detected.")
-        st.info(
-            f"Temperature difference is below "
-            f"the {FAULT_THRESHOLD:.1f}°C fault threshold."
-        )
+        st.info("Operating conditions are nominal. No immediate action required.")
     else:
         st.error(
-            f"⚠️ FAULT DETECTED\n\n"
-            f"Temperature difference = {difference:.2f} °C"
+            f"⚠️ **FAULT DETECTED**\n\n"
+            f"Calculated Temperature Difference: **{results['temperature_difference']:.2f} °C** "
+            f"(Exceeds Threshold of {results['threshold']:.2f} °C)"
         )
-        st.warning("Attention required within 2 days.")
-        st.write("**Status:** Fault detected.")
+        st.warning(f"**Recommended Action:** {results['action']}")
 
-    # ========================================================
-    # ANALYSIS SUMMARY
-    # ========================================================
-
+    # 5. Display analysis summary table
     st.divider()
-    st.subheader("📊 Analysis Summary")
+    st.subheader("📊 Executive Summary")
 
-    if difference < FAULT_THRESHOLD:
-        status = "NO FAULT"
-        required_action = "No action required"
-    else:
-        status = "FAULT"
-        required_action = "Attention required within 2 days"
-
-    results = {
-        "Temperature Range": f"{MIN_TEMPERATURE:.2f} – {MAX_TEMPERATURE:.2f} °C",
-        "Minimum Temperature": f"{min_temp:.2f} °C",
-        "Maximum Temperature": f"{max_temp:.2f} °C",
-        "Temperature Difference": f"{difference:.2f} °C",
-        "Mean Temperature": f"{mean_temp:.2f} °C",
-        "Fault Threshold": f"{FAULT_THRESHOLD:.2f} °C",
-        "Status": status,
-        "Required Action": required_action
+    summary = {
+        "Calibration Scale Range": f"{min_scale:.2f} °C to {max_scale:.2f} °C",
+        "Estimated Min Temperature": f"{results['min_temperature']:.2f} °C",
+        "Estimated Max Temperature": f"{results['max_temperature']:.2f} °C",
+        "Active Temperature Delta": f"{results['temperature_difference']:.2f} °C",
+        "Average Region Temperature": f"{results['mean_temperature']:.2f} °C",
+        "Configured Fault Threshold": f"{results['threshold']:.2f} °C",
+        "Evaluation Status": results["status"],
+        "Required Action": results["action"]
     }
 
-    for key, value in results.items():
-        st.write(f"**{key}:** {value}")
-
-    # ========================================================
-    # ANALYSIS INFORMATION
-    # ========================================================
-
-    st.divider()
-    st.subheader("ℹ️ Analysis Information")
-
-    st.write(
-        f"Temperature calibration range: "
-        f"{MIN_TEMPERATURE:.1f}–{MAX_TEMPERATURE:.1f} °C"
-    )
-    st.write(
-        f"Pixel analysis range: "
-        f"{LOW_PERCENTILE}th–{HIGH_PERCENTILE}th percentile"
-    )
-    st.write(
-        "Extreme pixels are ignored to reduce the effect "
-        "of image borders, text, noise, and isolated pixels."
-    )
-
-# ============================================================
-# NO IMAGE LOADED
-# ============================================================
+    for key, val in summary.items():
+        st.write(f"**{key}:** {val}")
 
 else:
-
-    st.info("Please upload a thermal image to begin the analysis.")
-    st.write(f"**Current temperature range:** {MIN_TEMPERATURE:.0f}–{MAX_TEMPERATURE:.0f} °C")
-    st.write(f"**Fault threshold:** {FAULT_THRESHOLD:.0f} °C")
-    st.write("**Fault action:** Attention required within 2 days.")
-
+    # Instructions displayed before file upload
+    st.info("Please upload a thermal image above to generate an analysis report.")
+    st.write("---")
+    st.write("### Instructions:")
+    st.write("1. Set the calibration scale on the left sidebar to match your thermal camera's legend limits.")
+    st.write("2. Upload a thermal inspection image (`.jpg`, `.png`, `.bmp`, or `.tiff`).")
+    st.write("3. Review calculated temperature differences and fault flags.")
