@@ -8,14 +8,14 @@ st.set_page_config(
 )
 
 st.title("🌡️ Thermal Image Analyzer")
-st.write("Automated thermal component analysis and OEM report benchmark matching.")
+st.write("Automated thermal component analysis with dynamic scale syncing.")
 
 # ============================================================
-# BENCHMARK DATASET LOOKUP (Matches image table directly)
+# BENCHMARK DATASET LOOKUP (Matches image table)
 # ============================================================
 
 BENCHMARKS = {
-    "Manual Entry": None,
+    "Custom / Manual Entry": {"min": 7.0, "max": 40.0},
     "20250315-133514-016 (ΔT: 1.9°C)": {"min": 37.6, "max": 39.5},
     "20251111-112915-003 (ΔT: 9.6°C)": {"min": 21.9, "max": 31.5},
     "20251111-114541-001 (ΔT: 28.4°C)": {"min": 7.2, "max": 35.6},
@@ -30,28 +30,37 @@ BENCHMARKS = {
     "20251117-124611-004 (ΔT: 11.0°C)": {"min": 22.8, "max": 33.8},
 }
 
-st.sidebar.header("⚙️ OEM Calibration / Preset Selection")
+st.sidebar.header("⚙️ OEM Scale Calibration")
 
-selected_preset = st.sidebar.selectbox("Select Benchmark Image Preset", list(BENCHMARKS.keys()))
+# Callback to sync inputs when dropdown changes
+def update_scale_values():
+    selected = st.session_state["preset_select"]
+    st.session_state["min_temp_input"] = BENCHMARKS[selected]["min"]
+    st.session_state["max_temp_input"] = BENCHMARKS[selected]["max"]
 
-if selected_preset != "Manual Entry":
-    preset_data = BENCHMARKS[selected_preset]
-    default_min = preset_data["min"]
-    default_max = preset_data["max"]
-else:
-    default_min = 7.0
-    default_max = 40.0
+# Initialize session state if first run
+if "min_temp_input" not in st.session_state:
+    st.session_state["min_temp_input"] = 7.0
+if "max_temp_input" not in st.session_state:
+    st.session_state["max_temp_input"] = 40.0
+
+st.sidebar.selectbox(
+    "Select Target Image Preset",
+    list(BENCHMARKS.keys()),
+    key="preset_select",
+    on_change=update_scale_values
+)
 
 known_cold = st.sidebar.number_input(
     "Scale Min Temp (°C)",
-    value=float(default_min),
+    key="min_temp_input",
     step=0.1,
     format="%.1f"
 )
 
 known_hot = st.sidebar.number_input(
     "Scale Max Temp (°C)",
-    value=float(default_max),
+    key="max_temp_input",
     step=0.1,
     format="%.1f"
 )
@@ -116,4 +125,4 @@ if uploaded_file is not None:
         st.error(f"Error processing image: {str(e)}")
 
 else:
-    st.info("Upload a thermal image or pick a preset from the sidebar to inspect results.")
+    st.info("Upload a thermal image and select its preset from the sidebar.")
