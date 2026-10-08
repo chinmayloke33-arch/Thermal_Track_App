@@ -10,121 +10,113 @@ st.set_page_config(
 )
 
 st.title("🌡️ Thermal Track Analyzer")
-st.write("Upload a thermal image to analyze the track temperature.")
 
-# ---------------------------------------------------------
-# SIDEBAR
-# ---------------------------------------------------------
+uploaded_file = st.file_uploader(
+    "Upload thermal image",
+    type=["jpg", "jpeg", "png"]
+)
 
-st.sidebar.header("Settings")
+st.sidebar.header("Temperature Settings")
 
-scale_max = st.sidebar.number_input(
-    "Upper temperature (°C)",
-    value=35.0,
+# Use the temperature range actually visible on the thermal image.
+# These can be changed for different cameras.
+UPPER_TEMP = st.sidebar.number_input(
+    "Upper scale temperature (°C)",
+    value=40.0,
     step=1.0
 )
 
-scale_min = st.sidebar.number_input(
-    "Lower temperature (°C)",
-    value=-26.0,
+LOWER_TEMP = st.sidebar.number_input(
+    "Lower scale temperature (°C)",
+    value=0.0,
     step=1.0
 )
 
-fault_limit = st.sidebar.number_input(
-    "Fault threshold (°C)",
-    value=5.0,
-    step=0.5
-)
-
-# ---------------------------------------------------------
-# FUNCTIONS
-# ---------------------------------------------------------
-
-def get_colorbar(image):
-    h, w = image.shape[:2]
-
-    x1 = int(w * 0.91)
-    x2 = int(w * 0.985)
-
-    y1 = int(h * 0.15)
-    y2 = int(h * 0.85)
-
-    return image[y1:y2, x1:x2]
+FAULT_LIMIT = 5.0
 
 
-def create_temperature_lookup(image, max_temp, min_temp):
-    colorbar = get_colorbar(image)
+# =========================================================
+# THERMAL COLOR INTENSITY
+# =========================================================
 
-    if colorbar.size == 0:
-        return None
-
-    h, w = colorbar.shape[:2]
-
-    # Use several columns instead of only one
-    x1 = max(0, int(w * 0.25))
-    x2 = min(w, int(w * 0.75))
-
-    colors = []
-    temperatures = []
-
-    for y in range(h):
-
-        row = colorbar[y, x1:x2]
-
-        if len(row) == 0:
-            continue
-
-        color = np.mean(row, axis=0)
-
-        colors.append(color)
-
-        temperature = max_temp - (
-            y / max(1, h - 1)
-        ) * (max_temp - min_temp)
-
-        temperatures.append(temperature)
-
-    if len(colors) == 0:
-        return None
-
-    return (
-        np.array(colors, dtype=np.float32),
-        np.array(temperatures, dtype=np.float32)
-    )
-
-
-def detect_rail(image):
-    h, w = image.shape[:2]
+def thermal_intensity(image):
 
     hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
 
-    saturation = hsv[:, :, 1]
-    brightness = hsv[:, :, 2]
+    saturation = hsv[:, :, 1].astype(np.float32)
+    value = hsv[:, :, 2].astype(np.float32)
 
-    # Bright thermal regions
-    mask = (
-        (brightness > 130) &
-        (saturation > 45)
-    ).astype(np.uint8) * 255
+    # Thermal images:
+    # dark purple = colder
+    # red/orange = warmer
+    # yellow/white = hottest
 
-    # Remove temperature scale
-    mask[:, int(w * 0.88):] = 0
+    intensity = (
+        0.55 * value +
+        0.45 * saturation
+    )
 
-    # Remove text/header
-    mask[:int(h * 0.12), :] = 0
+    return intensity
 
-    # Remove timestamp/footer
+
+# =========================================================
+# REMOVE UNWANTED AREAS
+# =========================================================
+
+def create_valid_mask(image):
+
+    h, w = image.shape[:2]
+
+    mask = np.ones((h, w), dtype=np.uint8)
+
+    # Remove right-side temperature scale
+    mask[:, int(w * 0.89):] = 0
+
+    # Remove top information
+    mask[:int(h * 0.13), :] = 0
+
+    # Remove bottom timestamp
     mask[int(h * 0.90):, :] = 0
 
-    # Morphological filtering
-    kernel1 = np.ones((3, 3), np.uint8)
-    kernel2 = np.ones((7, 7), np.uint8)
+    return mask
+
+
+# =========================================================
+# DETECT RAIL
+# =========================================================
+
+def detect_rail(image):
+
+    intensity = thermal_intensity(image)
+
+    valid = create_valid_mask(image)
+
+    values = intensity[valid > 0]
+
+    if len(values) == 0:
+        return None
+
+    # Only keep the hottest part of the thermal image.
+    # This prevents the purple background from becoming
+    # the minimum temperature.
+    threshold = np.percentile(values, 88)
+
+    mask = (
+        (intensity >= threshold) &
+        (valid > 0)
+    ).astype(np.uint8) * 255
+
+    # Remove small noise
+    kernel = np.ones((3, 3), np.uint8)
 
     mask = cv2.morphologyEx(
         mask,
         cv2.MORPH_OPEN,
-        kernel1
+        kernel
     )
+
+    # Connect broken rail lines
+    kernel2 = np.ones((7, 7), np.uint8)
 
     mask = cv2.morphologyEx(
         mask,
@@ -132,103 +124,65 @@ def detect_rail(image):
         kernel2
     )
 
-    # Keep only reasonably large connected components
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+    # Keep only reasonably large regions
+    number, labels, stats, _ = cv2.connectedComponentsWithStats(
         mask,
         connectivity=8
     )
 
-    clean = np.zeros_like(mask)
+    final_mask = np.zeros_like(mask)
 
-    for i in range(1, num_labels):
+    for i in range(1, number):
 
         area = stats[i, cv2.CC_STAT_AREA]
 
-        if area > 100:
-            clean[labels == i] = 255
+        if area > 50:
+            final_mask[labels == i] = 255
 
-    # Slight dilation
-    clean = cv2.dilate(
-        clean,
-        np.ones((3, 3), np.uint8),
-        iterations=1
-    )
-
-    return clean
+    return final_mask
 
 
-def pixel_temperature(pixel, lookup):
-    colors, temperatures = lookup
+# =========================================================
+# CONVERT THERMAL INTENSITY TO TEMPERATURE
+# =========================================================
 
-    pixel = pixel.astype(np.float32)
+def calculate_temperature(image, mask):
 
-    distances = np.linalg.norm(
-        colors - pixel,
-        axis=1
-    )
+    intensity = thermal_intensity(image)
 
-    index = np.argmin(distances)
+    pixels = intensity[mask > 0]
 
-    return float(temperatures[index])
+    if len(pixels) < 20:
+        return None
 
+    # Remove extreme noise
+    low = np.percentile(pixels, 5)
+    high = np.percentile(pixels, 95)
 
-def calculate_temperature(image, mask, lookup):
-
-    pixels = image[mask > 0]
+    pixels = pixels[
+        (pixels >= low) &
+        (pixels <= high)
+    ]
 
     if len(pixels) == 0:
         return None
 
-    # Sample maximum 8000 pixels
-    if len(pixels) > 8000:
-        indexes = np.linspace(
-            0,
-            len(pixels) - 1,
-            8000
-        ).astype(int)
-
-        pixels = pixels[indexes]
-
-    temperatures = []
-
-    for pixel in pixels:
-
-        temp = pixel_temperature(
-            pixel,
-            lookup
-        )
-
-        temperatures.append(temp)
-
-    temperatures = np.array(
-        temperatures,
-        dtype=np.float32
+    # Normalize ONLY inside detected thermal rail region
+    normalized = (
+        pixels - low
+    ) / max(
+        high - low,
+        1
     )
 
-    if len(temperatures) < 10:
-        return None
-
-    # Remove extreme noise
-    p2 = np.percentile(
-        temperatures,
-        2
+    temperatures = (
+        LOWER_TEMP +
+        normalized *
+        (UPPER_TEMP - LOWER_TEMP)
     )
 
-    p98 = np.percentile(
-        temperatures,
-        98
-    )
-
-    temperatures = temperatures[
-        (temperatures >= p2) &
-        (temperatures <= p98)
-    ]
-
-    if len(temperatures) == 0:
-        return None
-
-    minimum = float(np.min(temperatures))
-    maximum = float(np.max(temperatures))
+    minimum = float(np.percentile(temperatures, 5))
+    maximum = float(np.percentile(temperatures, 95))
     mean = float(np.mean(temperatures))
 
     difference = maximum - minimum
@@ -236,37 +190,32 @@ def calculate_temperature(image, mask, lookup):
     return minimum, maximum, mean, difference
 
 
+# =========================================================
+# SHOW DETECTED AREA
+# =========================================================
+
 def show_detection(image, mask):
 
-    result = image.copy()
+    output = image.copy()
 
-    overlay = image.copy()
+    overlay = output.copy()
 
     overlay[mask > 0] = [255, 255, 255]
 
-    result = cv2.addWeighted(
-        result,
-        0.65,
+    output = cv2.addWeighted(
+        output,
+        0.70,
         overlay,
-        0.35,
+        0.30,
         0
     )
 
-    return result
+    return output
 
 
-# ---------------------------------------------------------
-# IMAGE UPLOAD
-# ---------------------------------------------------------
-
-uploaded_file = st.file_uploader(
-    "Upload thermal image",
-    type=["jpg", "jpeg", "png"]
-)
-
-# ---------------------------------------------------------
-# ANALYSIS
-# ---------------------------------------------------------
+# =========================================================
+# MAIN
+# =========================================================
 
 if uploaded_file is not None:
 
@@ -276,7 +225,7 @@ if uploaded_file is not None:
 
     image = np.array(image)
 
-    st.subheader("Thermal Image")
+    st.subheader("Uploaded Thermal Image")
 
     st.image(
         image,
@@ -284,37 +233,31 @@ if uploaded_file is not None:
     )
 
     # -----------------------------------------------------
-    # CREATE TEMPERATURE SCALE
+    # Detect rail
     # -----------------------------------------------------
 
-    lookup = create_temperature_lookup(
-        image,
-        scale_max,
-        scale_min
-    )
+    with st.spinner("Analyzing thermal rail..."):
 
-    if lookup is None:
+        rail_mask = detect_rail(image)
+
+    if rail_mask is None:
 
         st.error(
-            "Could not read the thermal temperature scale."
+            "Unable to detect the thermal rail."
         )
 
         st.stop()
 
     # -----------------------------------------------------
-    # DETECT RAIL
+    # Display detection
     # -----------------------------------------------------
 
-    with st.spinner("Analyzing thermal track..."):
-
-        rail_mask = detect_rail(image)
+    st.subheader("Detected Rail Region")
 
     detected = show_detection(
         image,
         rail_mask
     )
-
-    st.subheader("Detected Thermal Track")
 
     st.image(
         detected,
@@ -322,19 +265,18 @@ if uploaded_file is not None:
     )
 
     # -----------------------------------------------------
-    # CALCULATE TEMPERATURE
+    # Calculate temperatures
     # -----------------------------------------------------
 
     result = calculate_temperature(
         image,
-        rail_mask,
-        lookup
+        rail_mask
     )
 
     if result is None:
 
         st.error(
-            "No suitable thermal track region was detected."
+            "Not enough thermal information was detected."
         )
 
         st.stop()
@@ -342,10 +284,10 @@ if uploaded_file is not None:
     minimum, maximum, mean, difference = result
 
     # -----------------------------------------------------
-    # RESULTS
+    # Results
     # -----------------------------------------------------
 
-    st.subheader("Temperature Results")
+    st.subheader("Temperature Analysis")
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -374,19 +316,17 @@ if uploaded_file is not None:
         )
 
     # -----------------------------------------------------
-    # FAULT DECISION
+    # Fault decision
     # -----------------------------------------------------
 
     st.subheader("Track Condition")
 
-    if difference >= fault_limit:
+    if difference >= FAULT_LIMIT:
 
-        st.error(
-            "⚠️ FAULT DETECTED"
-        )
+        st.error("⚠️ FAULT DETECTED")
 
         st.write(
-            f"Temperature difference: "
+            f"Temperature difference = "
             f"{difference:.1f} °C"
         )
 
@@ -396,21 +336,13 @@ if uploaded_file is not None:
 
     else:
 
-        st.success(
-            "✅ NO FAULT"
-        )
+        st.success("✅ NO FAULT")
 
         st.write(
-            f"Temperature difference: "
+            f"Temperature difference = "
             f"{difference:.1f} °C"
         )
 
         st.info(
-            "Temperature difference is below the fault threshold."
+            "Temperature difference is below 5 °C."
         )
-
-else:
-
-    st.info(
-        "Upload a thermal image to start the analysis."
-    )
