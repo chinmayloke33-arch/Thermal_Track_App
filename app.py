@@ -1,567 +1,416 @@
-
 import streamlit as st
 from PIL import Image
 import numpy as np
 import cv2
 
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
-
 st.set_page_config(
-    page_title="Thermal Image Analyzer",
+    page_title="Thermal Track Analyzer",
     page_icon="🌡️",
     layout="wide"
 )
 
-st.title("🌡️ Thermal Image Analyzer")
+st.title("🌡️ Thermal Track Analyzer")
+st.write("Upload a thermal image to analyze the track temperature.")
 
-st.write(
-    "Thermal image analysis for railway track inspection. "
-    "The system extracts the thermal region and calculates "
-    "minimum temperature, maximum temperature and temperature difference."
-)
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-FAULT_THRESHOLD = 5.0
-
-# Default scale values.
-# These are ONLY defaults and are NOT used to create
-# an artificial 7–40°C temperature range.
-
-DEFAULT_SCALE_MIN = 20.0
-DEFAULT_SCALE_MAX = 40.0
-
-# ============================================================
+# ---------------------------------------------------------
 # SIDEBAR
-# ============================================================
+# ---------------------------------------------------------
 
-st.sidebar.header("⚙️ Analysis Settings")
-
-st.sidebar.write(
-    "Enter the temperature values shown at the top "
-    "and bottom of the thermal colour scale."
-)
+st.sidebar.header("Settings")
 
 scale_max = st.sidebar.number_input(
-    "Thermal scale MAX (°C)",
-    min_value=-50.0,
-    max_value=150.0,
-    value=DEFAULT_SCALE_MAX,
-    step=0.1
+    "Upper temperature (°C)",
+    value=35.0,
+    step=1.0
 )
 
 scale_min = st.sidebar.number_input(
-    "Thermal scale MIN (°C)",
-    min_value=-50.0,
-    max_value=150.0,
-    value=DEFAULT_SCALE_MIN,
-    step=0.1
+    "Lower temperature (°C)",
+    value=-26.0,
+    step=1.0
 )
 
-if scale_max <= scale_min:
-    st.sidebar.error(
-        "Scale MAX must be greater than Scale MIN."
-    )
-    st.stop()
-
-st.sidebar.divider()
-
-# Percentage of hottest pixels used for maximum
-hot_percentile = st.sidebar.slider(
-    "Hot pixel percentile",
-    min_value=90,
-    max_value=100,
-    value=98,
-    step=1
+fault_limit = st.sidebar.number_input(
+    "Fault threshold (°C)",
+    value=5.0,
+    step=0.5
 )
 
-# Percentage of coldest pixels used for minimum
-cold_percentile = st.sidebar.slider(
-    "Cold pixel percentile",
-    min_value=0,
-    max_value=10,
-    value=2,
-    step=1
-)
+# ---------------------------------------------------------
+# FUNCTIONS
+# ---------------------------------------------------------
 
-# ============================================================
-# IMAGE UPLOAD
-# ============================================================
+def get_colorbar(image):
+    h, w = image.shape[:2]
 
-uploaded_file = st.file_uploader(
-    "Upload thermal image",
-    type=[
-        "jpg",
-        "jpeg",
-        "png",
-        "bmp",
-        "tif",
-        "tiff"
-    ]
-)
+    x1 = int(w * 0.91)
+    x2 = int(w * 0.985)
 
-# ============================================================
-# FUNCTION:
-# CONVERT THERMAL IMAGE TO INTENSITY
-# ============================================================
+    y1 = int(h * 0.15)
+    y2 = int(h * 0.85)
 
-def calculate_thermal_intensity(image_rgb):
+    return image[y1:y2, x1:x2]
 
-    image = image_rgb.astype(np.float32)
 
-    # Convert RGB to HSV
-    hsv = cv2.cvtColor(
-        image_rgb,
-        cv2.COLOR_RGB2HSV
+def create_temperature_lookup(image, max_temp, min_temp):
+    colorbar = get_colorbar(image)
+
+    if colorbar.size == 0:
+        return None
+
+    h, w = colorbar.shape[:2]
+
+    # Use several columns instead of only one
+    x1 = max(0, int(w * 0.25))
+    x2 = min(w, int(w * 0.75))
+
+    colors = []
+    temperatures = []
+
+    for y in range(h):
+
+        row = colorbar[y, x1:x2]
+
+        if len(row) == 0:
+            continue
+
+        color = np.mean(row, axis=0)
+
+        colors.append(color)
+
+        temperature = max_temp - (
+            y / max(1, h - 1)
+        ) * (max_temp - min_temp)
+
+        temperatures.append(temperature)
+
+    if len(colors) == 0:
+        return None
+
+    return (
+        np.array(colors, dtype=np.float32),
+        np.array(temperatures, dtype=np.float32)
     )
 
-    h = hsv[:, :, 0]
-    s = hsv[:, :, 1]
-    v = hsv[:, :, 2]
 
-    # --------------------------------------------------------
-    # Thermal images contain very bright yellow/white
-    # regions for hot surfaces.
-    #
-    # We combine brightness and saturation rather than using
-    # grayscale.
-    # --------------------------------------------------------
+def detect_rail(image):
+    h, w = image.shape[:2]
 
-    brightness = v / 255.0
-    saturation = s / 255.0
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
 
-    # Red/yellow/white thermal colours generally have
-    # strong thermal intensity.
-    thermal_intensity = (
-        0.65 * brightness +
-        0.35 * saturation
-    )
+    saturation = hsv[:, :, 1]
+    brightness = hsv[:, :, 2]
 
-    return thermal_intensity
-
-
-# ============================================================
-# FUNCTION:
-# REMOVE UI / TEXT / TEMPERATURE SCALE
-# ============================================================
-
-def create_analysis_mask(image_rgb):
-
-    height, width, _ = image_rgb.shape
-
-    hsv = cv2.cvtColor(
-        image_rgb,
-        cv2.COLOR_RGB2HSV
-    )
-
-    h = hsv[:, :, 0]
-    s = hsv[:, :, 1]
-    v = hsv[:, :, 2]
-
-    # --------------------------------------------------------
-    # Basic thermal brightness mask
-    # --------------------------------------------------------
-
+    # Bright thermal regions
     mask = (
-        (v > 90) &
-        (s > 70)
-    )
+        (brightness > 130) &
+        (saturation > 45)
+    ).astype(np.uint8) * 255
 
-    # --------------------------------------------------------
-    # Ignore the right-side temperature colour bar.
-    # The colour scale occupies approximately the last 8–10%
-    # of the image.
-    # --------------------------------------------------------
+    # Remove temperature scale
+    mask[:, int(w * 0.88):] = 0
 
-    right_limit = int(width * 0.90)
+    # Remove text/header
+    mask[:int(h * 0.12), :] = 0
 
-    mask[:, right_limit:] = False
+    # Remove timestamp/footer
+    mask[int(h * 0.90):, :] = 0
 
-    # --------------------------------------------------------
-    # Ignore the upper information area.
-    # --------------------------------------------------------
-
-    top_limit = int(height * 0.08)
-
-    mask[:top_limit, :] = False
-
-    # --------------------------------------------------------
-    # Ignore bottom timestamp area.
-    # --------------------------------------------------------
-
-    bottom_limit = int(height * 0.92)
-
-    mask[bottom_limit:, :] = False
-
-    # --------------------------------------------------------
-    # Remove small isolated objects.
-    # --------------------------------------------------------
-
-    kernel = np.ones((3, 3), np.uint8)
+    # Morphological filtering
+    kernel1 = np.ones((3, 3), np.uint8)
+    kernel2 = np.ones((7, 7), np.uint8)
 
     mask = cv2.morphologyEx(
-        mask.astype(np.uint8),
+        mask,
         cv2.MORPH_OPEN,
-        kernel
+        kernel1
     )
 
     mask = cv2.morphologyEx(
         mask,
         cv2.MORPH_CLOSE,
-        kernel
+        kernel2
     )
 
-    return mask.astype(bool)
-
-
-# ============================================================
-# FUNCTION:
-# CONVERT THERMAL INTENSITY TO TEMPERATURE
-# ============================================================
-
-def intensity_to_temperature(
-    intensity,
-    scale_min,
-    scale_max
-):
-
-    # Normalize image intensity.
-    #
-    # IMPORTANT:
-    # This is calibrated using the thermal scale supplied
-    # by the user, not an arbitrary 7–40°C range.
-
-    intensity = np.clip(
-        intensity,
-        0.0,
-        1.0
+    # Keep only reasonably large connected components
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask,
+        connectivity=8
     )
 
-    temperature = (
-        scale_min
-        +
-        intensity *
-        (scale_max - scale_min)
+    clean = np.zeros_like(mask)
+
+    for i in range(1, num_labels):
+
+        area = stats[i, cv2.CC_STAT_AREA]
+
+        if area > 100:
+            clean[labels == i] = 255
+
+    # Slight dilation
+    clean = cv2.dilate(
+        clean,
+        np.ones((3, 3), np.uint8),
+        iterations=1
     )
 
-    return temperature
+    return clean
 
 
-# ============================================================
-# MAIN PROGRAM
-# ============================================================
+def pixel_temperature(pixel, lookup):
+    colors, temperatures = lookup
+
+    pixel = pixel.astype(np.float32)
+
+    distances = np.linalg.norm(
+        colors - pixel,
+        axis=1
+    )
+
+    index = np.argmin(distances)
+
+    return float(temperatures[index])
+
+
+def calculate_temperature(image, mask, lookup):
+
+    pixels = image[mask > 0]
+
+    if len(pixels) == 0:
+        return None
+
+    # Sample maximum 8000 pixels
+    if len(pixels) > 8000:
+        indexes = np.linspace(
+            0,
+            len(pixels) - 1,
+            8000
+        ).astype(int)
+
+        pixels = pixels[indexes]
+
+    temperatures = []
+
+    for pixel in pixels:
+
+        temp = pixel_temperature(
+            pixel,
+            lookup
+        )
+
+        temperatures.append(temp)
+
+    temperatures = np.array(
+        temperatures,
+        dtype=np.float32
+    )
+
+    if len(temperatures) < 10:
+        return None
+
+    # Remove extreme noise
+    p2 = np.percentile(
+        temperatures,
+        2
+    )
+
+    p98 = np.percentile(
+        temperatures,
+        98
+    )
+
+    temperatures = temperatures[
+        (temperatures >= p2) &
+        (temperatures <= p98)
+    ]
+
+    if len(temperatures) == 0:
+        return None
+
+    minimum = float(np.min(temperatures))
+    maximum = float(np.max(temperatures))
+    mean = float(np.mean(temperatures))
+
+    difference = maximum - minimum
+
+    return minimum, maximum, mean, difference
+
+
+def show_detection(image, mask):
+
+    result = image.copy()
+
+    overlay = image.copy()
+
+    overlay[mask > 0] = [255, 255, 255]
+
+    result = cv2.addWeighted(
+        result,
+        0.65,
+        overlay,
+        0.35,
+        0
+    )
+
+    return result
+
+
+# ---------------------------------------------------------
+# IMAGE UPLOAD
+# ---------------------------------------------------------
+
+uploaded_file = st.file_uploader(
+    "Upload thermal image",
+    type=["jpg", "jpeg", "png"]
+)
+
+# ---------------------------------------------------------
+# ANALYSIS
+# ---------------------------------------------------------
 
 if uploaded_file is not None:
-
-    # --------------------------------------------------------
-    # READ IMAGE
-    # --------------------------------------------------------
 
     image = Image.open(
         uploaded_file
     ).convert("RGB")
 
-    img = np.array(image)
+    image = np.array(image)
 
-    # --------------------------------------------------------
-    # DISPLAY IMAGE
-    # --------------------------------------------------------
-
-    st.subheader("📷 Uploaded Thermal Image")
+    st.subheader("Thermal Image")
 
     st.image(
         image,
         use_container_width=True
     )
 
-    # ========================================================
-    # CREATE THERMAL MASK
-    # ========================================================
+    # -----------------------------------------------------
+    # CREATE TEMPERATURE SCALE
+    # -----------------------------------------------------
 
-    mask = create_analysis_mask(img)
-
-    number_of_pixels = int(
-        np.sum(mask)
+    lookup = create_temperature_lookup(
+        image,
+        scale_max,
+        scale_min
     )
 
-    if number_of_pixels < 50:
+    if lookup is None:
 
         st.error(
-            "Not enough thermal pixels were detected. "
-            "Try adjusting the image or analysis settings."
+            "Could not read the thermal temperature scale."
         )
 
         st.stop()
 
-    # ========================================================
-    # CALCULATE THERMAL INTENSITY
-    # ========================================================
+    # -----------------------------------------------------
+    # DETECT RAIL
+    # -----------------------------------------------------
 
-    intensity = calculate_thermal_intensity(
-        img
+    with st.spinner("Analyzing thermal track..."):
+
+        rail_mask = detect_rail(image)
+
+    detected = show_detection(
+        image,
+        rail_mask
     )
 
-    selected_intensity = intensity[
-        mask
-    ]
+    st.subheader("Detected Thermal Track")
 
-    # ========================================================
-    # REMOVE EXTREME NOISE
-    # ========================================================
-
-    low_intensity = np.percentile(
-        selected_intensity,
-        cold_percentile
+    st.image(
+        detected,
+        use_container_width=True
     )
 
-    high_intensity = np.percentile(
-        selected_intensity,
-        hot_percentile
+    # -----------------------------------------------------
+    # CALCULATE TEMPERATURE
+    # -----------------------------------------------------
+
+    result = calculate_temperature(
+        image,
+        rail_mask,
+        lookup
     )
 
-    selected_intensity = selected_intensity[
-        (selected_intensity >= low_intensity) &
-        (selected_intensity <= high_intensity)
-    ]
-
-    if len(selected_intensity) < 20:
+    if result is None:
 
         st.error(
-            "Not enough valid thermal pixels remain "
-            "after filtering."
+            "No suitable thermal track region was detected."
         )
 
         st.stop()
 
-    # ========================================================
-    # CONVERT TO TEMPERATURE
-    # ========================================================
+    minimum, maximum, mean, difference = result
 
-    temperatures = intensity_to_temperature(
-        selected_intensity,
-        scale_min,
-        scale_max
-    )
-
-    # ========================================================
-    # CALCULATE RESULTS
-    # ========================================================
-
-    min_temp = float(
-        np.min(temperatures)
-    )
-
-    max_temp = float(
-        np.max(temperatures)
-    )
-
-    mean_temp = float(
-        np.mean(temperatures)
-    )
-
-    difference = abs(
-        max_temp - min_temp
-    )
-
-    # ========================================================
+    # -----------------------------------------------------
     # RESULTS
-    # ========================================================
+    # -----------------------------------------------------
 
-    st.divider()
-
-    st.subheader("🌡️ Temperature Results")
+    st.subheader("Temperature Results")
 
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-
         st.metric(
-            "Minimum Temperature",
-            f"{min_temp:.2f} °C"
+            "Minimum",
+            f"{minimum:.1f} °C"
         )
 
     with c2:
-
         st.metric(
-            "Maximum Temperature",
-            f"{max_temp:.2f} °C"
+            "Maximum",
+            f"{maximum:.1f} °C"
         )
 
     with c3:
-
         st.metric(
-            "Temperature Difference",
-            f"{difference:.2f} °C"
+            "Mean",
+            f"{mean:.1f} °C"
         )
 
     with c4:
-
         st.metric(
-            "Mean Temperature",
-            f"{mean_temp:.2f} °C"
+            "Difference",
+            f"{difference:.1f} °C"
         )
 
-    # ========================================================
-    # FAULT ASSESSMENT
-    # ========================================================
+    # -----------------------------------------------------
+    # FAULT DECISION
+    # -----------------------------------------------------
 
-    st.divider()
+    st.subheader("Track Condition")
 
-    st.subheader("🚦 Fault Assessment")
+    if difference >= fault_limit:
 
-    if difference < FAULT_THRESHOLD:
-
-        st.success(
-            f"✅ NO FAULT\n\n"
-            f"Temperature difference = "
-            f"{difference:.2f} °C"
+        st.error(
+            "⚠️ FAULT DETECTED"
         )
 
         st.write(
-            "**Status:** NO FAULT"
-        )
-
-        st.info(
-            "Temperature difference is below "
-            "the 5°C threshold."
-        )
-
-        status = "NO FAULT"
-
-        required_action = (
-            "No action required"
-        )
-
-    else:
-
-        st.error(
-            f"⚠️ FAULT DETECTED\n\n"
-            f"Temperature difference = "
-            f"{difference:.2f} °C"
+            f"Temperature difference: "
+            f"{difference:.1f} °C"
         )
 
         st.warning(
             "Attention required within 2 days."
         )
 
-        st.write(
-            "**Status:** FAULT"
+    else:
+
+        st.success(
+            "✅ NO FAULT"
         )
-
-        status = "FAULT"
-
-        required_action = (
-            "Attention required within 2 days"
-        )
-
-    # ========================================================
-    # SUMMARY
-    # ========================================================
-
-    st.divider()
-
-    st.subheader("📊 Analysis Summary")
-
-    results = {
-
-        "Minimum Temperature":
-            f"{min_temp:.2f} °C",
-
-        "Maximum Temperature":
-            f"{max_temp:.2f} °C",
-
-        "Temperature Difference":
-            f"{difference:.2f} °C",
-
-        "Mean Temperature":
-            f"{mean_temp:.2f} °C",
-
-        "Fault Threshold":
-            f"{FAULT_THRESHOLD:.2f} °C",
-
-        "Status":
-            status,
-
-        "Required Action":
-            required_action,
-
-        "Thermal Pixels Analysed":
-            f"{number_of_pixels:,}"
-    }
-
-    for key, value in results.items():
 
         st.write(
-            f"**{key}:** {value}"
+            f"Temperature difference: "
+            f"{difference:.1f} °C"
         )
 
-    # ========================================================
-    # SHOW ANALYSIS MASK
-    # ========================================================
-
-    st.divider()
-
-    st.subheader("🔍 Thermal Region Detected")
-
-    display_mask = (
-        mask.astype(np.uint8) * 255
-    )
-
-    st.image(
-        display_mask,
-        caption="Pixels used for thermal analysis",
-        use_container_width=True
-    )
-
-    # ========================================================
-    # INFORMATION
-    # ========================================================
-
-    st.divider()
-
-    st.subheader("ℹ️ Analysis Information")
-
-    st.write(
-        f"**Thermal scale:** "
-        f"{scale_min:.1f} – {scale_max:.1f} °C"
-    )
-
-    st.write(
-        f"**Fault threshold:** "
-        f"{FAULT_THRESHOLD:.1f} °C"
-    )
-
-    st.write(
-        f"**Hot percentile:** "
-        f"{hot_percentile}th"
-    )
-
-    st.write(
-        f"**Cold percentile:** "
-        f"{cold_percentile}th"
-    )
-
-    st.warning(
-        "This version is a thermal-colour prototype. "
-        "It does not read the camera's hidden radiometric "
-        "temperature data. The thermal scale values shown "
-        "on the image should be entered in the sidebar."
-    )
+        st.info(
+            "Temperature difference is below the fault threshold."
+        )
 
 else:
 
     st.info(
-        "Please upload a thermal image to begin."
-    )
-
-    st.write(
-        "**Fault threshold:** 5 °C"
-    )
-
-    st.write(
-        "**Fault action:** Attention required within 2 days."
+        "Upload a thermal image to start the analysis."
     )
