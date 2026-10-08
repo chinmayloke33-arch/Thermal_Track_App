@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 from PIL import Image
 import numpy as np
@@ -565,35 +565,3 @@ else:
     st.write(
         "**Fault action:** Attention required within 2 days."
     )
-```
-
-### `requirements.txt`
-
-Create a second file in your GitHub repository called **`requirements.txt`**:
-
-```text
-streamlit
-numpy
-opencv-python-headless
-Pillow
-```
-
-### But there is one important limitation
-
-I **do not want you to consider this final yet**.
-
-Your department's values such as:
-
-**39.5, 37.6 → ΔT = 1.9°C**
-
-need to be reproduced by the program. The code above is a much better starting point than your old grayscale code, but it still uses the thermal colour intensity as a calibration.
-
-The **next version should be calibrated against your 12 actual images and the 12 Max/Min values you supplied**.
-
-That is the important step. We can make the program compare:
-
-**Department result vs. Program result**
-
-for all 12 images and calculate the error. Then we can adjust the thermal-pixel extraction until the results are close.
-
-So **don't deploy this as the final scientific/inspection version yet**. It is the correct direction for the prototype, but we should validate it against your 12 known results first.
