@@ -7,11 +7,15 @@ import pandas as pd
 import io
 import os
 import re
+import hashlib
+import psycopg2
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 # ============================================================
-# KRCL THERMAL TRACK ANALYZER
-# IT DEPARTMENT - APPRENTICESHIP PROJECT
+# PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
@@ -20,8 +24,16 @@ st.set_page_config(
     layout="wide"
 )
 
+IST = ZoneInfo("Asia/Kolkata")
+FAULT_THRESHOLD = 5.0
+
+
 st.title("🌡️ KRCL Thermal Track Analyzer")
-st.caption("IT Department • Thermal Image Analysis & OEM Validation")
+
+st.caption(
+    "IT Department | Thermal Image Analysis, "
+    "OEM Validation and Inspection Records"
+)
 
 
 # ============================================================
@@ -29,62 +41,50 @@ st.caption("IT Department • Thermal Image Analysis & OEM Validation")
 # ============================================================
 
 OEM_DATA = {
-
     "20250315-133514-016": {
         "max": 39.5,
         "min": 37.6
     },
-
     "20251111-112915-003": {
         "max": 31.5,
         "min": 21.9
     },
-
     "20251111-114541-001": {
         "max": 35.6,
         "min": 7.2
     },
-
     "20251111-114605-002": {
         "max": 35.4,
         "min": 27.4
     },
-
     "20251113-074547-002": {
         "max": 17.6,
         "min": 13.7
     },
-
     "20251113-091808-012": {
         "max": 24.7,
         "min": 19.3
     },
-
     "20251113-092707-005": {
         "max": 24.4,
         "min": 20.5
     },
-
     "20251113-093327-012": {
         "max": 24.0,
         "min": 18.3
     },
-
     "20251113-113151-016": {
         "max": 34.5,
         "min": 24.7
     },
-
     "20251114-101128-007": {
         "max": 26.2,
         "min": 15.8
     },
-
     "20251114-114841-018": {
         "max": 35.0,
         "min": 13.6
     },
-
     "20251117-124611-004": {
         "max": 33.8,
         "min": 22.8
@@ -92,7 +92,239 @@ OEM_DATA = {
 }
 
 
-FAULT_THRESHOLD = 5.0
+# ============================================================
+# DATABASE SETUP
+# ============================================================
+
+def get_database_connection():
+    """
+    Connect to the hosted PostgreSQL database.
+
+    DATABASE_URL must be configured in Streamlit Secrets.
+    """
+
+    database_url = st.secrets.get(
+        "DATABASE_URL",
+        ""
+    )
+
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is missing. "
+            "Configure it in Streamlit Cloud Secrets."
+        )
+
+    return psycopg2.connect(database_url)
+
+
+def initialize_database():
+    """
+    Create the inspection table if it does not exist.
+    """
+
+    connection = get_database_connection()
+
+    try:
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thermal_inspections (
+                    id BIGINT GENERATED ALWAYS AS IDENTITY
+                        PRIMARY KEY,
+
+                    image_filename TEXT NOT NULL,
+
+                    image_id TEXT,
+
+                    image_datetime TIMESTAMPTZ,
+
+                    uploaded_at TIMESTAMPTZ NOT NULL,
+
+                    minimum_temperature DOUBLE PRECISION,
+
+                    maximum_temperature DOUBLE PRECISION,
+
+                    temperature_difference DOUBLE PRECISION,
+
+                    mean_temperature DOUBLE PRECISION,
+
+                    fault_status TEXT NOT NULL,
+
+                    recommendation TEXT,
+
+                    temperature_source TEXT NOT NULL,
+
+                    image_sha256 TEXT NOT NULL,
+
+                    image_data BYTEA NOT NULL
+                );
+                """
+            )
+
+        connection.commit()
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+def save_inspection(
+    filename,
+    image_bytes,
+    image_datetime,
+    image_id,
+    minimum,
+    maximum,
+    source
+):
+    """
+    Save the uploaded image and analysis result.
+
+    If temperatures cannot be reliably calculated,
+    the image is still stored with NOT ANALYZED status.
+    """
+
+    uploaded_at = datetime.now(IST)
+
+    image_hash = hashlib.sha256(
+        image_bytes
+    ).hexdigest()
+
+    if minimum is not None and maximum is not None:
+
+        minimum = float(minimum)
+        maximum = float(maximum)
+
+        difference = maximum - minimum
+
+        mean_temperature = (
+            minimum + maximum
+        ) / 2
+
+        status, recommendation = get_decision(
+            difference
+        )
+
+    else:
+
+        difference = None
+        mean_temperature = None
+
+        status = "NOT ANALYZED"
+
+        recommendation = (
+            "Temperature values unavailable. "
+            "Review the image or provide a validated "
+            "temperature source."
+        )
+
+    connection = get_database_connection()
+
+    try:
+        with connection.cursor() as cursor:
+
+            cursor.execute(
+                """
+                INSERT INTO thermal_inspections (
+                    image_filename,
+                    image_id,
+                    image_datetime,
+                    uploaded_at,
+                    minimum_temperature,
+                    maximum_temperature,
+                    temperature_difference,
+                    mean_temperature,
+                    fault_status,
+                    recommendation,
+                    temperature_source,
+                    image_sha256,
+                    image_data
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s
+                )
+                RETURNING id;
+                """,
+                (
+                    filename,
+                    image_id,
+                    image_datetime,
+                    uploaded_at,
+                    minimum,
+                    maximum,
+                    difference,
+                    mean_temperature,
+                    status,
+                    recommendation,
+                    source,
+                    image_hash,
+                    psycopg2.Binary(image_bytes)
+                )
+            )
+
+            record_id = cursor.fetchone()[0]
+
+        connection.commit()
+
+        return record_id
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+# ============================================================
+# TIMESTAMP EXTRACTION
+# ============================================================
+
+def extract_image_timestamp(filename):
+    """
+    Recognize filenames such as:
+
+    20250315-133514-016.jpg
+
+    Interpreted as:
+    15 March 2025, 13:35:14 IST.
+    """
+
+    name = os.path.splitext(
+        os.path.basename(filename)
+    )[0]
+
+    match = re.search(
+        r"(?<!\d)(\d{8})-(\d{6})-(\d+)(?!\d)",
+        name
+    )
+
+    if not match:
+        return None, None
+
+    date_part = match.group(1)
+    time_part = match.group(2)
+    image_id = match.group(3)
+
+    try:
+        timestamp = datetime.strptime(
+            date_part + time_part,
+            "%Y%m%d%H%M%S"
+        )
+
+        timestamp = timestamp.replace(
+            tzinfo=IST
+        )
+
+        return timestamp, image_id
+
+    except ValueError:
+        return None, image_id
 
 
 # ============================================================
@@ -105,9 +337,11 @@ def clean_filename(filename):
         os.path.basename(filename)
     )[0]
 
-    name = re.sub(r"\s+", "", name)
-
-    return name
+    return re.sub(
+        r"\s+",
+        "",
+        name
+    )
 
 
 def find_oem_reference(filename):
@@ -131,25 +365,22 @@ def find_oem_reference(filename):
 
 def get_analysis_region(image):
 
-    image = np.array(
+    image_array = np.array(
         image.convert("RGB")
     )
 
-    height, width = image.shape[:2]
+    height, width = image_array.shape[:2]
 
-    # Remove common borders / scale region.
     left = int(width * 0.03)
     right = int(width * 0.88)
 
     top = int(height * 0.08)
     bottom = int(height * 0.92)
 
-    region = image[
+    return image_array[
         top:bottom,
         left:right
     ]
-
-    return region
 
 
 # ============================================================
@@ -178,14 +409,16 @@ def extract_features(image):
     A = lab[:, :, 1].astype(float)
     B = lab[:, :, 2].astype(float)
 
-    # Remove very dark / nearly grey pixels.
     mask = (
         (V > 25) &
         (S > 20)
     )
 
     if np.sum(mask) < 100:
-        mask = np.ones(V.shape, dtype=bool)
+        mask = np.ones(
+            V.shape,
+            dtype=bool
+        )
 
     def percentile(array, value):
 
@@ -195,7 +428,6 @@ def extract_features(image):
         )
 
     features = [
-
         np.mean(H[mask]),
         np.std(H[mask]),
 
@@ -218,18 +450,21 @@ def extract_features(image):
         np.mean(B[mask])
     ]
 
-    return np.array(features), region
+    return np.array(
+        features,
+        dtype=float
+    ), region
 
 
 # ============================================================
-# RIDGE CALIBRATION
+# RIDGE CALIBRATION MODEL
 # ============================================================
 
 def train_calibration_model():
 
     folder = "calibration_images"
 
-    if not os.path.exists(folder):
+    if not os.path.isdir(folder):
         return None
 
     X = []
@@ -252,13 +487,13 @@ def train_calibration_model():
 
         try:
 
-            image = Image.open(
-                path
-            ).convert("RGB")
+            with Image.open(path) as original:
 
-            features, _ = extract_features(
-                image
-            )
+                image = original.convert("RGB")
+
+                features, _ = extract_features(
+                    image
+                )
 
             X.append(features)
 
@@ -276,30 +511,31 @@ def train_calibration_model():
     if len(X) < 4:
         return None
 
-    X = np.array(X, dtype=float)
+    X = np.asarray(
+        X,
+        dtype=float
+    )
 
-    Y_MAX = np.array(
+    Y_MAX = np.asarray(
         Y_MAX,
         dtype=float
     )
 
-    Y_MIN = np.array(
+    Y_MIN = np.asarray(
         Y_MIN,
         dtype=float
     )
 
-    # Standardization
     mean = X.mean(axis=0)
 
     std = X.std(axis=0)
 
-    std[std < 1e-9] = 1
+    std[std < 1e-9] = 1.0
 
     X_scaled = (
         X - mean
     ) / std
 
-    # Ridge regression
     alpha = 10.0
 
     identity = np.eye(
@@ -307,78 +543,56 @@ def train_calibration_model():
     )
 
     coef_max = np.linalg.solve(
-        X_scaled.T @ X_scaled +
-        alpha * identity,
+        X_scaled.T @ X_scaled
+        + alpha * identity,
 
         X_scaled.T @ Y_MAX
     )
 
     coef_min = np.linalg.solve(
-        X_scaled.T @ X_scaled +
-        alpha * identity,
+        X_scaled.T @ X_scaled
+        + alpha * identity,
 
         X_scaled.T @ Y_MIN
     )
 
-    intercept_max = (
-        np.mean(Y_MAX)
-        -
-        np.mean(X_scaled, axis=0)
-        @ coef_max
+    intercept_max = np.mean(
+        Y_MAX - X_scaled @ coef_max
     )
 
-    intercept_min = (
-        np.mean(Y_MIN)
-        -
-        np.mean(X_scaled, axis=0)
-        @ coef_min
+    intercept_min = np.mean(
+        Y_MIN - X_scaled @ coef_min
     )
 
     return {
-
         "mean": mean,
-
         "std": std,
-
         "coef_max": coef_max,
-
         "coef_min": coef_min,
-
-        "intercept_max":
-            intercept_max,
-
-        "intercept_min":
-            intercept_min,
-
-        "samples":
-            len(X)
+        "intercept_max": intercept_max,
+        "intercept_min": intercept_min,
+        "samples": len(X)
     }
 
 
 # ============================================================
-# PREDICTION
+# TEMPERATURE PREDICTION
 # ============================================================
 
-def predict_temperature(
-    features,
-    model
-):
+def predict_temperature(features, model):
 
     X = (
-        features -
-        model["mean"]
+        features - model["mean"]
     ) / model["std"]
 
     predicted_max = (
         model["intercept_max"]
-        +
-        X @ model["coef_max"]
+        + X @ model["coef_max"]
     )
 
     predicted_min = (
         model["intercept_min"]
-        +
-        X @ model["coef_min"]
+        + X @ model["coef_min"]
     )
 
     predicted_max = float(
@@ -389,7 +603,6 @@ def predict_temperature(
         predicted_min
     )
 
-    # Make sure minimum <= maximum.
     if predicted_min > predicted_max:
 
         predicted_min, predicted_max = (
@@ -397,10 +610,33 @@ def predict_temperature(
             predicted_min
         )
 
-    return (
-        predicted_min,
-        predicted_max
+    observed_min = min(
+        value["min"]
+        for value in OEM_DATA.values()
     )
+
+    observed_max = max(
+        value["max"]
+        for value in OEM_DATA.values()
+    )
+
+    predicted_min = float(
+        np.clip(
+            predicted_min,
+            observed_min,
+            observed_max
+        )
+    )
+
+    predicted_max = float(
+        np.clip(
+            predicted_max,
+            observed_min,
+            observed_max
+        )
+    )
+
+    return predicted_min, predicted_max
 
 
 # ============================================================
@@ -423,29 +659,29 @@ def get_decision(delta):
 
 
 # ============================================================
-# DISPLAY RESULT
+# RESULT DISPLAY
 # ============================================================
 
 def display_result(
     minimum,
     maximum,
     source,
+    image_datetime=None,
+    image_id=None,
     reference=None
 ):
 
-    difference = (
-        maximum -
-        minimum
-    )
+    difference = maximum - minimum
 
     mean_temperature = (
-        minimum +
-        maximum
+        minimum + maximum
     ) / 2
 
-    status, message = get_decision(
+    status, recommendation = get_decision(
         difference
     )
+
+    st.subheader("Analysis Results")
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -469,18 +705,46 @@ def display_result(
         f"{mean_temperature:.1f} °C"
     )
 
-    if status == "FAULT":
+    if image_datetime is not None:
 
-        st.error(
-            "🔴 FAULT — "
-            "ATTENTION REQUIRED WITHIN 2 DAYS"
+        date_col, time_col = st.columns(2)
+
+        date_col.write(
+            "**Image Date:** "
+            + image_datetime.strftime("%d %B %Y")
+        )
+
+        time_col.write(
+            "**Image Time:** "
+            + image_datetime.strftime("%H:%M:%S IST")
         )
 
     else:
 
-        st.success(
-            "🟢 NO FAULT"
+        st.warning(
+            "Timestamp unavailable in filename. "
+            "Printed-image OCR is not enabled."
         )
+
+    if image_id is not None:
+
+        st.write(
+            f"**Image ID:** {image_id}"
+        )
+
+    if status == "FAULT":
+
+        st.error(
+            "🔴 FAULT — ATTENTION REQUIRED WITHIN 2 DAYS"
+        )
+
+    else:
+
+        st.success("🟢 NO FAULT")
+
+    st.write(
+        f"**Recommendation:** {recommendation}"
+    )
 
     st.caption(
         f"Temperature source: {source}"
@@ -488,17 +752,10 @@ def display_result(
 
     if reference is not None:
 
-        reference_difference = (
-            reference["max"]
-            -
-            reference["min"]
-        )
-
         st.info(
-            "OEM Reference: "
-            f"Maximum = {reference['max']:.1f} °C | "
-            f"Minimum = {reference['min']:.1f} °C | "
-            f"Difference = {reference_difference:.1f} °C"
+            "OEM reference: "
+            f"Maximum {reference['max']:.1f} °C | "
+            f"Minimum {reference['min']:.1f} °C"
         )
 
 
@@ -508,55 +765,41 @@ def display_result(
 
 with st.sidebar:
 
-    st.header(
-        "⚙️ Analysis Settings"
-    )
+    st.header("⚙️ Analysis Settings")
 
     st.metric(
         "Fault Threshold",
         "5.0 °C"
     )
 
-    st.divider()
+    st.write("ΔT < 5°C → NO FAULT")
 
-    st.subheader(
-        "Decision Rule"
-    )
+    st.write("ΔT ≥ 5°C → FAULT")
 
     st.write(
-        "ΔT < 5°C → NO FAULT"
-    )
-
-    st.write(
-        "ΔT ≥ 5°C → FAULT"
-    )
-
-    st.write(
-        "Fault → Attention required within 2 days"
+        "FAULT → Attention required within 2 days"
     )
 
     st.divider()
 
-    st.subheader(
-        "Calibration"
-    )
+    st.subheader("Calibration")
 
-    if os.path.exists(
-        "calibration_images"
-    ):
+    calibration_folder = "calibration_images"
+
+    if os.path.isdir(calibration_folder):
 
         count = len([
-            f
-            for f in os.listdir(
-                "calibration_images"
+            filename
+            for filename in os.listdir(
+                calibration_folder
             )
-            if f.lower().endswith(
+            if filename.lower().endswith(
                 (".jpg", ".jpeg", ".png")
             )
         ])
 
         st.write(
-            f"Calibration images: **{count}**"
+            f"Calibration images: {count}"
         )
 
     else:
@@ -567,330 +810,495 @@ with st.sidebar:
 
 
 # ============================================================
-# UPLOAD
+# DATABASE INITIALIZATION
 # ============================================================
 
-uploaded_files = st.file_uploader(
+try:
 
-    "Upload thermal image(s)",
+    initialize_database()
 
-    type=[
-        "jpg",
-        "jpeg",
-        "png"
-    ],
+    database_ready = True
 
-    accept_multiple_files=True
-)
+except Exception as error:
 
+    database_ready = False
 
-if not uploaded_files:
-
-    st.info(
-        "Upload one or more thermal images."
+    st.error(
+        "Database connection failed. "
+        "Check your DATABASE_URL in Streamlit Secrets."
     )
 
-    st.markdown(
-        "### Fault Classification"
-    )
-
-    st.write(
-        "**ΔT < 5°C → 🟢 NO FAULT**"
-    )
-
-    st.write(
-        "**ΔT ≥ 5°C → 🔴 FAULT**"
-    )
-
-    st.warning(
-        "Important: ordinary colourized thermal "
-        "JPEG images do not necessarily contain "
-        "the original camera radiometric temperature "
-        "matrix."
-    )
-
-    st.stop()
+    st.caption(str(error))
 
 
 # ============================================================
-# TRAIN CALIBRATION MODEL
+# ANALYSIS FORM
 # ============================================================
 
-model = train_calibration_model()
+st.header("📤 Upload Thermal Images")
+
+with st.form("thermal_analysis_form"):
+
+    uploaded_files = st.file_uploader(
+        "Choose thermal image(s)",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
+
+    analyze_button = st.form_submit_button(
+        "Analyze and Save Results",
+        type="primary"
+    )
 
 
 # ============================================================
-# PROCESS IMAGES
+# PROCESS UPLOADS ONLY AFTER FORM SUBMISSION
 # ============================================================
 
-results = []
+if analyze_button:
 
-
-for uploaded_file in uploaded_files:
-
-    try:
-
-        image = Image.open(
-            io.BytesIO(
-                uploaded_file.getvalue()
-            )
-        ).convert("RGB")
-
-    except Exception as error:
+    if not database_ready:
 
         st.error(
-            f"Could not read "
-            f"{uploaded_file.name}: {error}"
+            "Cannot save results because the database "
+            "is unavailable. No analysis was submitted."
         )
 
-        continue
+    elif not uploaded_files:
 
-    st.divider()
-
-    st.subheader(
-        f"📷 {uploaded_file.name}"
-    )
-
-    image_col, result_col = st.columns(
-        [1.2, 1]
-    )
-
-    with image_col:
-
-        st.image(
-            image,
-            caption="Thermal Image",
-            width="stretch"
+        st.warning(
+            "Please upload at least one image."
         )
 
-    reference = find_oem_reference(
-        uploaded_file.name
-    )
+    else:
 
+        model = train_calibration_model()
 
-    # ========================================================
-    # EXACT OEM IMAGE
-    # ========================================================
+        results = []
 
-    if reference is not None:
+        for uploaded_file in uploaded_files:
 
-        with result_col:
+            image_bytes = uploaded_file.getvalue()
 
-            st.success(
-                "OEM reference found."
+            try:
+
+                image = Image.open(
+                    io.BytesIO(image_bytes)
+                ).convert("RGB")
+
+            except Exception as error:
+
+                st.error(
+                    f"Could not read "
+                    f"{uploaded_file.name}: {error}"
+                )
+
+                continue
+
+            st.divider()
+
+            st.subheader(
+                f"📷 {uploaded_file.name}"
             )
 
-            display_result(
-
-                reference["min"],
-
-                reference["max"],
-
-                "Actual OEM / Department reading",
-
-                reference
+            image_datetime, image_id = (
+                extract_image_timestamp(
+                    uploaded_file.name
+                )
             )
 
-        difference = (
-            reference["max"]
-            -
-            reference["min"]
-        )
+            image_col, result_col = st.columns(
+                [1.1, 1.5]
+            )
 
-        results.append({
+            with image_col:
 
-            "Image":
-                uploaded_file.name,
+                st.image(
+                    image,
+                    caption="Uploaded Thermal Image",
+                    use_container_width=True
+                )
 
-            "Source":
-                "OEM Reference",
+            reference = find_oem_reference(
+                uploaded_file.name
+            )
 
-            "Minimum (°C)":
-                reference["min"],
+            minimum = None
+            maximum = None
+            source = "Temperature unavailable"
 
-            "Maximum (°C)":
-                reference["max"],
+            with result_col:
 
-            "Difference (°C)":
-                round(
-                    difference,
-                    1
-                ),
+                if reference is not None:
 
-            "Decision":
-                get_decision(
+                    minimum = reference["min"]
+                    maximum = reference["max"]
+
+                    source = "OEM Reference"
+
+                    display_result(
+                        minimum,
+                        maximum,
+                        source,
+                        image_datetime,
+                        image_id,
+                        reference
+                    )
+
+                    st.caption(
+                        "These values are the stored OEM "
+                        "reference readings for this filename."
+                    )
+
+                else:
+
+                    features, region = extract_features(
+                        image
+                    )
+
+                    if model is None:
+
+                        st.warning(
+                            "No calibration model is available. "
+                            "The image will be stored, but "
+                            "temperatures cannot be estimated."
+                        )
+
+                    else:
+
+                        minimum, maximum = (
+                            predict_temperature(
+                                features,
+                                model
+                            )
+                        )
+
+                        source = (
+                            "Empirical estimate using "
+                            f"{model['samples']} OEM images"
+                        )
+
+                        display_result(
+                            minimum,
+                            maximum,
+                            source,
+                            image_datetime,
+                            image_id
+                        )
+
+                        st.warning(
+                            "These temperatures are empirical "
+                            "estimates from image colours, not "
+                            "direct radiometric measurements. "
+                            "Validate them before operational use."
+                        )
+
+                    with st.expander(
+                        "View region used for image analysis"
+                    ):
+
+                        st.image(
+                            region,
+                            caption="Image feature extraction region",
+                            use_container_width=True
+                        )
+
+            # ------------------------------------------------
+            # SAVE EVERY SUBMITTED IMAGE
+            # ------------------------------------------------
+
+            try:
+
+                record_id = save_inspection(
+                    filename=uploaded_file.name,
+                    image_bytes=image_bytes,
+                    image_datetime=image_datetime,
+                    image_id=image_id,
+                    minimum=minimum,
+                    maximum=maximum,
+                    source=source
+                )
+
+                st.success(
+                    f"Saved to database. Record ID: {record_id}"
+                )
+
+            except Exception as error:
+
+                st.error(
+                    "Could not save this inspection to "
+                    f"the database: {error}"
+                )
+
+            # ------------------------------------------------
+            # SUMMARY DATA
+            # ------------------------------------------------
+
+            if minimum is not None and maximum is not None:
+
+                difference = maximum - minimum
+
+                status, recommendation = get_decision(
                     difference
-                )[0]
-        })
+                )
 
-        continue
+            else:
 
+                difference = None
+                status = "NOT ANALYZED"
 
-    # ========================================================
-    # NEW IMAGE
-    # ========================================================
+                recommendation = (
+                    "Temperature information unavailable."
+                )
 
-    features, region = extract_features(
-        image
-    )
+            results.append({
+                "Record Image": uploaded_file.name,
+                "Image ID": image_id,
+                "Image Date/Time": (
+                    image_datetime.isoformat()
+                    if image_datetime is not None
+                    else None
+                ),
+                "Temperature Source": source,
+                "Minimum (°C)": minimum,
+                "Maximum (°C)": maximum,
+                "Difference (°C)": difference,
+                "Decision": status,
+                "Recommendation": recommendation
+            })
 
-    with result_col:
+        # ----------------------------------------------------
+        # CURRENT BATCH SUMMARY
+        # ----------------------------------------------------
 
-        if model is None:
+        if results:
 
-            st.warning(
-                "No calibration model available."
+            st.divider()
+
+            st.header("📊 Current Batch Summary")
+
+            result_df = pd.DataFrame(results)
+
+            st.dataframe(
+                result_df,
+                use_container_width=True,
+                hide_index=True
             )
 
-            st.write(
-                "Place the 12 OEM images inside "
-                "`calibration_images/` to enable "
-                "calibrated estimation."
+            st.download_button(
+                "⬇️ Download Analysis Report",
+                data=result_df.to_csv(
+                    index=False
+                ).encode("utf-8"),
+                file_name="KRCL_Thermal_Analysis_Report.csv",
+                mime="text/csv"
             )
+
+
+# ============================================================
+# INSPECTION HISTORY
+# ============================================================
+
+st.divider()
+
+st.header("📚 Inspection History")
+
+st.write(
+    "View previously saved images and their inspection records."
+)
+
+if st.button("Refresh Inspection History"):
+
+    if not database_ready:
+
+        st.error(
+            "Database is unavailable."
+        )
+
+    else:
+
+        try:
+
+            connection = get_database_connection()
+
+            try:
+
+                with connection.cursor() as cursor:
+
+                    cursor.execute(
+                        """
+                        SELECT
+                            id,
+                            image_filename,
+                            image_id,
+                            image_datetime,
+                            uploaded_at,
+                            minimum_temperature,
+                            maximum_temperature,
+                            temperature_difference,
+                            mean_temperature,
+                            fault_status,
+                            recommendation,
+                            temperature_source
+                        FROM thermal_inspections
+                        ORDER BY uploaded_at DESC;
+                        """
+                    )
+
+                    rows = cursor.fetchall()
+
+                    columns = [
+                        "Record ID",
+                        "Image",
+                        "Image ID",
+                        "Image Date/Time",
+                        "Uploaded At",
+                        "Minimum (°C)",
+                        "Maximum (°C)",
+                        "Difference (°C)",
+                        "Mean (°C)",
+                        "Decision",
+                        "Recommendation",
+                        "Temperature Source"
+                    ]
+
+                    history_df = pd.DataFrame(
+                        rows,
+                        columns=columns
+                    )
+
+            finally:
+
+                connection.close()
+
+            st.session_state["inspection_history"] = (
+                history_df
+            )
+
+        except Exception as error:
+
+            st.error(
+                f"Could not load inspection history: {error}"
+            )
+
+
+if "inspection_history" in st.session_state:
+
+    history_df = st.session_state[
+        "inspection_history"
+    ]
+
+    if history_df.empty:
+
+        st.info(
+            "No inspection records found."
+        )
+
+    else:
+
+        filter_options = [
+            "All",
+            "FAULT",
+            "NO FAULT",
+            "NOT ANALYZED"
+        ]
+
+        selected_status = st.selectbox(
+            "Filter by decision",
+            filter_options
+        )
+
+        if selected_status != "All":
+
+            filtered_df = history_df[
+                history_df["Decision"] == selected_status
+            ]
 
         else:
 
-            minimum, maximum = (
-                predict_temperature(
-                    features,
-                    model
-                )
-            )
+            filtered_df = history_df
 
-            # Keep predictions inside the
-            # observed OEM temperature range.
-            observed_min = min(
-                v["min"]
-                for v in OEM_DATA.values()
-            )
-
-            observed_max = max(
-                v["max"]
-                for v in OEM_DATA.values()
-            )
-
-            minimum = float(
-                np.clip(
-                    minimum,
-                    observed_min,
-                    observed_max
-                )
-            )
-
-            maximum = float(
-                np.clip(
-                    maximum,
-                    observed_min,
-                    observed_max
-                )
-            )
-
-            display_result(
-
-                minimum,
-
-                maximum,
-
-                f"Calibrated estimate "
-                f"using {model['samples']} OEM images"
-            )
-
-            st.warning(
-                "This is an empirical estimate. "
-                "It is not a direct radiometric "
-                "temperature measurement."
-            )
-
-            difference = (
-                maximum -
-                minimum
-            )
-
-            results.append({
-
-                "Image":
-                    uploaded_file.name,
-
-                "Source":
-                    "Calibrated Estimate",
-
-                "Minimum (°C)":
-                    round(
-                        minimum,
-                        1
-                    ),
-
-                "Maximum (°C)":
-                    round(
-                        maximum,
-                        1
-                    ),
-
-                "Difference (°C)":
-                    round(
-                        difference,
-                        1
-                    ),
-
-                "Decision":
-                    get_decision(
-                        difference
-                    )[0]
-            })
-
-
-    with st.expander(
-        "View image region used for analysis"
-    ):
-
-        st.image(
-            region,
-            caption=(
-                "Region used for "
-                "colour-feature extraction"
-            ),
-            width="stretch"
+        st.dataframe(
+            filtered_df,
+            use_container_width=True,
+            hide_index=True
         )
 
+        st.download_button(
+            "⬇️ Download Inspection History",
+            data=filtered_df.to_csv(
+                index=False
+            ).encode("utf-8"),
+            file_name="KRCL_Inspection_History.csv",
+            mime="text/csv"
+        )
 
-# ============================================================
-# SUMMARY
-# ============================================================
+        st.subheader("Retrieve Stored Image")
 
-if results:
+        selected_record = st.number_input(
+            "Enter Record ID",
+            min_value=1,
+            step=1
+        )
 
-    st.divider()
+        if st.button("View Stored Image"):
 
-    st.header(
-        "📊 Analysis Summary"
-    )
+            try:
 
-    result_df = pd.DataFrame(
-        results
-    )
+                connection = get_database_connection()
 
-    st.dataframe(
-        result_df,
-        width="stretch",
-        hide_index=True
-    )
+                try:
 
-    csv = result_df.to_csv(
-        index=False
-    ).encode("utf-8")
+                    with connection.cursor() as cursor:
 
-    st.download_button(
+                        cursor.execute(
+                            """
+                            SELECT image_filename, image_data
+                            FROM thermal_inspections
+                            WHERE id = %s;
+                            """,
+                            (int(selected_record),)
+                        )
 
-        "⬇️ Download Analysis Report",
+                        stored_row = cursor.fetchone()
 
-        data=csv,
+                finally:
 
-        file_name=(
-            "KRCL_Thermal_Analysis_Report.csv"
-        ),
+                    connection.close()
 
-        mime="text/csv"
-    )
+                if stored_row is None:
+
+                    st.warning(
+                        "No image exists for that record ID."
+                    )
+
+                else:
+
+                    stored_filename = stored_row[0]
+
+                    stored_bytes = bytes(
+                        stored_row[1]
+                    )
+
+                    st.write(
+                        f"**Original filename:** {stored_filename}"
+                    )
+
+                    stored_image = Image.open(
+                        io.BytesIO(stored_bytes)
+                    )
+
+                    st.image(
+                        stored_image,
+                        caption=stored_filename,
+                        use_container_width=True
+                    )
+
+            except Exception as error:
+
+                st.error(
+                    f"Could not retrieve stored image: {error}"
+                )
 
 
 # ============================================================
@@ -899,83 +1307,65 @@ if results:
 
 st.divider()
 
-st.header(
-    "🔬 OEM Validation Dataset"
-)
+st.header("🔬 OEM Reference Dataset")
 
 validation = []
 
 for image_id, values in OEM_DATA.items():
 
     difference = (
-        values["max"]
-        -
-        values["min"]
+        values["max"] - values["min"]
     )
 
-    status = get_decision(
+    status, _ = get_decision(
         difference
-    )[0]
+    )
 
     validation.append({
-
-        "Image ID":
-            image_id,
-
-        "OEM Maximum (°C)":
-            values["max"],
-
-        "OEM Minimum (°C)":
-            values["min"],
-
-        "OEM Difference (°C)":
-            round(
-                difference,
-                1
-            ),
-
-        "Decision":
-            status
+        "Image ID": image_id,
+        "OEM Maximum (°C)": values["max"],
+        "OEM Minimum (°C)": values["min"],
+        "OEM Difference (°C)": round(
+            difference,
+            1
+        ),
+        "Decision": status
     })
 
-
-validation_df = pd.DataFrame(
-    validation
-)
+validation_df = pd.DataFrame(validation)
 
 st.dataframe(
     validation_df,
-    width="stretch",
+    use_container_width=True,
     hide_index=True
 )
 
 
-st.info(
-    "The OEM values above are treated as the "
-    "reference measurements supplied for this project."
-)
-
-
 # ============================================================
-# IMPORTANT ENGINEERING NOTE
+# ENGINEERING NOTE
 # ============================================================
 
 st.divider()
 
-st.subheader(
-    "⚠️ Engineering Note"
+st.subheader("⚠️ Engineering Note")
+
+st.write(
+    "The application uses OEM reference values when the "
+    "uploaded filename matches a known reference. For other "
+    "images, it can produce empirical estimates if a calibration "
+    "model is available."
 )
 
 st.write(
-    "For operational deployment, the preferred input "
-    "is the original radiometric data exported by the "
-    "thermal camera. A normal colourized JPEG does not "
-    "necessarily contain the underlying temperature matrix."
+    "A normal colourized thermal JPEG does not necessarily "
+    "contain the original radiometric temperature matrix. "
+    "Actual temperature extraction requires suitable camera "
+    "data or a validated measurement method."
 )
 
 st.write(
-    "The current application therefore distinguishes "
-    "between actual OEM reference values and empirical "
-    "estimates for previously unseen images."
+    "The 5°C decision threshold is a configured project rule. "
+    "Operational use must follow the applicable approved "
+    "railway inspection procedure."
 )
 
