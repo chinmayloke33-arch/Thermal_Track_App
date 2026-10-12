@@ -213,34 +213,43 @@ def extract_features(image):
 # ============================================================
 
 def train_calibration_model():
+    """Train from matching OEM images; retain a nearest-reference fallback."""
     folder = "calibration_images"
-    if not os.path.isdir(folder):
-        return None
-
     X, Y_MAX, Y_MIN = [], [], []
 
-    for filename in os.listdir(folder):
-        reference = find_oem_reference(filename)
-        if reference is None:
-            continue
+    if os.path.isdir(folder):
+        for filename in os.listdir(folder):
+            reference = find_oem_reference(filename)
+            if reference is None:
+                continue
+            path = os.path.join(folder, filename)
+            try:
+                with Image.open(path) as original:
+                    features, _ = extract_features(original.convert("RGB"))
+                X.append(features)
+                Y_MAX.append(reference["max"])
+                Y_MIN.append(reference["min"])
+            except Exception:
+                continue
 
-        path = os.path.join(folder, filename)
-        try:
-            with Image.open(path) as original:
-                image = original.convert("RGB")
-                features, _ = extract_features(image)
-            X.append(features)
-            Y_MAX.append(reference["max"])
-            Y_MIN.append(reference["min"])
-        except Exception:
-            continue
+    # If at least one reference image is available, preserve it for nearest-neighbour fallback.
+    if len(X) > 0:
+        X = np.asarray(X, dtype=float)
+        Y_MAX = np.asarray(Y_MAX, dtype=float)
+        Y_MIN = np.asarray(Y_MIN, dtype=float)
+    else:
+        X = np.empty((0, 16), dtype=float)
+        Y_MAX = np.array([], dtype=float)
+        Y_MIN = np.array([], dtype=float)
 
     if len(X) < 4:
-        return None
-
-    X = np.asarray(X, dtype=float)
-    Y_MAX = np.asarray(Y_MAX, dtype=float)
-    Y_MIN = np.asarray(Y_MIN, dtype=float)
+        return {
+            "fallback": True,
+            "fallback_X": X,
+            "fallback_max": Y_MAX,
+            "fallback_min": Y_MIN,
+            "samples": len(X)
+        }
 
     mean = X.mean(axis=0)
     std = X.std(axis=0)
@@ -249,7 +258,6 @@ def train_calibration_model():
 
     alpha = 10.0
     identity = np.eye(X_scaled.shape[1])
-
     coef_max = np.linalg.solve(
         X_scaled.T @ X_scaled + alpha * identity,
         X_scaled.T @ Y_MAX
@@ -259,16 +267,17 @@ def train_calibration_model():
         X_scaled.T @ Y_MIN
     )
 
-    intercept_max = np.mean(Y_MAX - X_scaled @ coef_max)
-    intercept_min = np.mean(Y_MIN - X_scaled @ coef_min)
-
     return {
+        "fallback": False,
         "mean": mean,
         "std": std,
         "coef_max": coef_max,
         "coef_min": coef_min,
-        "intercept_max": intercept_max,
-        "intercept_min": intercept_min,
+        "intercept_max": float(np.mean(Y_MAX - X_scaled @ coef_max)),
+        "intercept_min": float(np.mean(Y_MIN - X_scaled @ coef_min)),
+        "fallback_X": X,
+        "fallback_max": Y_MAX,
+        "fallback_min": Y_MIN,
         "samples": len(X)
     }
 
@@ -278,24 +287,40 @@ def train_calibration_model():
 # ============================================================
 
 def predict_temperature(features, model):
-    X = (features - model["mean"]) / model["std"]
+    """Return estimated min/max for any image, including unknown filenames."""
+    observed_min = min(value["min"] for value in OEM_DATA.values())
+    observed_max = max(value["max"] for value in OEM_DATA.values())
 
-    predicted_max = float(
-        model["intercept_max"] + X @ model["coef_max"]
-    )
-    predicted_min = float(
-        model["intercept_min"] + X @ model["coef_min"]
-    )
+    if model is None:
+        # Last-resort estimate based on the centre of the available OEM range.
+        predicted_min = float(np.mean([v["min"] for v in OEM_DATA.values()]))
+        predicted_max = float(np.mean([v["max"] for v in OEM_DATA.values()]))
+    elif model.get("fallback", False):
+        reference_features = model.get("fallback_X", np.empty((0, len(features))))
+        if len(reference_features) > 0:
+            # Standardize each feature before selecting the most similar reference image.
+            scale = np.std(reference_features, axis=0)
+            scale[scale < 1e-9] = 1.0
+            standardized_refs = (reference_features - np.mean(reference_features, axis=0)) / scale
+            standardized_new = (features - np.mean(reference_features, axis=0)) / scale
+            distances = np.linalg.norm(standardized_refs - standardized_new, axis=1)
+            nearest = int(np.argmin(distances))
+            predicted_max = float(model["fallback_max"][nearest])
+            predicted_min = float(model["fallback_min"][nearest])
+        else:
+            # No usable calibration files: provide a clearly labelled rough baseline estimate.
+            predicted_min = float(np.mean([v["min"] for v in OEM_DATA.values()]))
+            predicted_max = float(np.mean([v["max"] for v in OEM_DATA.values()]))
+    else:
+        X = (features - model["mean"]) / model["std"]
+        predicted_max = float(model["intercept_max"] + X @ model["coef_max"])
+        predicted_min = float(model["intercept_min"] + X @ model["coef_min"])
 
     if predicted_min > predicted_max:
         predicted_min, predicted_max = predicted_max, predicted_min
 
-    observed_min = min(value["min"] for value in OEM_DATA.values())
-    observed_max = max(value["max"] for value in OEM_DATA.values())
-
     predicted_min = float(np.clip(predicted_min, observed_min, observed_max))
     predicted_max = float(np.clip(predicted_max, observed_min, observed_max))
-
     return predicted_min, predicted_max
 
 
@@ -599,31 +624,28 @@ if analyze_button:
                 else:
                     features, region = extract_features(image)
 
-                    if model is None:
-                        st.warning(
-                            "No calibration model is available. The image "
-                            "will be stored, but temperatures cannot be estimated."
-                        )
+                    minimum, maximum = predict_temperature(features, model)
+                    sample_count = model["samples"] if model is not None else 0
+                    if model is not None and not model.get("fallback", False):
+                        source = f"Empirical calibrated estimate using {sample_count} OEM images"
+                    elif sample_count > 0:
+                        source = f"Nearest-reference estimate using {sample_count} OEM images"
                     else:
-                        minimum, maximum = predict_temperature(features, model)
-                        source = (
-                            "Empirical estimate using "
-                            f"{model['samples']} OEM images"
-                        )
+                        source = "Rough OEM-range baseline estimate (no usable calibration images)"
 
-                        display_result(
-                            minimum,
-                            maximum,
-                            source,
-                            image_datetime,
-                            image_id
-                        )
+                    display_result(
+                        minimum,
+                        maximum,
+                        source,
+                        image_datetime,
+                        image_id
+                    )
 
-                        st.warning(
-                            "These temperatures are empirical estimates from "
-                            "image colours, not direct radiometric measurements. "
-                            "Validate them before operational use."
-                        )
+                    st.warning(
+                        "Unknown image: temperatures are estimated from image-colour features, "
+                        "not directly measured radiometric values. Estimates may be inaccurate; "
+                        "validate against the camera/OEM readings before operational use."
+                    )
 
                     with st.expander("View region used for image analysis"):
                         st.image(
@@ -869,4 +891,3 @@ st.write(
     "The 5°C decision threshold is a configured project rule. Operational "
     "use must follow the applicable approved railway inspection procedure."
 )
-
