@@ -8,6 +8,7 @@ import os
 import re
 import hashlib
 import psycopg2
+import pytesseract
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -120,6 +121,61 @@ def initialize_database():
 # ============================================================
 # TIMESTAMP EXTRACTION
 # ============================================================
+
+def extract_station_and_mast_from_image(image):
+    """Use OCR to detect station name and OHE mast number printed in the image.
+
+    Only clearly labelled text is accepted to avoid guessing. If OCR cannot
+    find a value, the caller receives "No record found" for that field.
+    """
+    try:
+        rgb = np.array(image.convert("RGB"))
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        # Upscale and threshold to improve OCR on small printed annotations.
+        enlarged = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        processed = cv2.threshold(
+            enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )[1]
+        texts = []
+        for candidate in (rgb, processed):
+            try:
+                texts.append(pytesseract.image_to_string(candidate, config="--psm 11"))
+            except Exception:
+                continue
+        text = "\n".join(texts)
+        lines = [re.sub(r"\s+", " ", line).strip(" :|-\t") for line in text.splitlines()]
+        lines = [line for line in lines if line]
+
+        station_name = None
+        mast_number = None
+
+        for i, line in enumerate(lines):
+            # Accept labelled fields such as "Station Name: Ratnagiri".
+            station_match = re.search(
+                r"(?i)\b(?:station\s*name|station)\s*[:#=-]?\s*(.+)$", line
+            )
+            if station_match:
+                value = station_match.group(1).strip(" :#=-")
+                if value and not re.fullmatch(r"(?i)(name|no\.?|number)", value):
+                    station_name = value[:100]
+                elif i + 1 < len(lines):
+                    station_name = lines[i + 1][:100]
+
+            mast_match = re.search(
+                r"(?i)\b(?:OHE\s*)?(?:mast|m\s*/\s*t)\s*(?:no\.?|number|#)?\s*[:#=-]?\s*([A-Z0-9]+(?:[/.-][A-Z0-9]+)*)\b",
+                line
+            )
+            if mast_match:
+                mast_number = mast_match.group(1).strip(" .,:;")[:50]
+            elif re.search(r"(?i)\b(?:OHE\s*)?mast\s*(?:no\.?|number)?\s*[:#=-]?\s*$", line) and i + 1 < len(lines):
+                possible = re.search(r"[A-Z0-9]+(?:[/.-][A-Z0-9]+)*", lines[i + 1], re.I)
+                if possible:
+                    mast_number = possible.group(0)[:50]
+
+        return station_name or "No record found", mast_number or "No record found", text.strip()
+    except Exception:
+        return "No record found", "No record found", ""
+
 
 def extract_image_timestamp(filename):
     """
@@ -521,22 +577,12 @@ except Exception as error:
 # ============================================================
 
 st.header("📤 Upload Thermal Images")
+st.info(
+    "Station Name and OHE Mast Number will be searched in the image using OCR. "
+    "If either value is not clearly detected, the app will show 'No record found'."
+)
 
 with st.form("thermal_analysis_form"):
-    st.subheader("📍 OHE Location Details")
-
-    station_name = st.text_input(
-        "Station Name",
-        placeholder="Enter station name"
-    ).strip()
-
-    ohe_mast_number = st.text_input(
-        "OHE Mast Number",
-        placeholder="Enter OHE mast number, e.g. 125/7"
-    ).strip()
-
-    st.divider()
-
     uploaded_files = st.file_uploader(
         "Choose thermal image(s)",
         type=["jpg", "jpeg", "png"],
@@ -559,10 +605,6 @@ if analyze_button:
             "Cannot save results because the database is unavailable. "
             "No analysis was submitted."
         )
-    elif not station_name:
-        st.warning("Please enter the Station Name.")
-    elif not ohe_mast_number:
-        st.warning("Please enter the OHE Mast Number.")
     elif not uploaded_files:
         st.warning("Please upload at least one image.")
     else:
@@ -584,6 +626,7 @@ if analyze_button:
             image_datetime, image_id = extract_image_timestamp(
                 uploaded_file.name
             )
+            station_name, ohe_mast_number, ocr_text = extract_station_and_mast_from_image(image)
 
             image_col, result_col = st.columns([1.1, 1.5])
 
@@ -602,6 +645,10 @@ if analyze_button:
             with result_col:
                 st.write(f"**Station Name:** {station_name}")
                 st.write(f"**OHE Mast Number:** {ohe_mast_number}")
+                if station_name == "No record found" or ohe_mast_number == "No record found":
+                    st.warning("Station or mast details were not detected clearly in this image.")
+                with st.expander("View OCR text detected from image"):
+                    st.text(ocr_text if ocr_text else "No readable text found in image.")
 
                 if reference is not None:
                     minimum = reference["min"]
@@ -877,6 +924,11 @@ st.dataframe(validation_df, use_container_width=True, hide_index=True)
 st.divider()
 st.subheader("⚠️ Engineering Note")
 
+st.write(
+    "Station Name and OHE Mast Number are detected from printed image text using OCR. "
+    "If labelled text is not readable, the application displays 'No record found'; "
+    "it does not ask the user to enter these values manually."
+)
 st.write(
     "The application uses OEM reference values when the uploaded filename "
     "matches a known reference. For other images, it can produce empirical "
