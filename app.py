@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 from PIL import Image
 import numpy as np
@@ -1644,4 +1644,4 @@ st.dataframe(
     use_container_width=True,
     hide_index=True
 )
-```
+
