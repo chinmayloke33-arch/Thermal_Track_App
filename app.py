@@ -119,7 +119,7 @@ def initialize_database():
 
 
 # ============================================================
-# TIMESTAMP EXTRACTION
+# TIMESTAMP & OCR EXTRACTION
 # ============================================================
 
 def extract_station_and_mast_from_image(image):
@@ -131,7 +131,6 @@ def extract_station_and_mast_from_image(image):
     try:
         rgb = np.array(image.convert("RGB"))
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        # Upscale and threshold to improve OCR on small printed annotations.
         enlarged = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
         processed = cv2.threshold(
             enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
@@ -150,7 +149,6 @@ def extract_station_and_mast_from_image(image):
         mast_number = None
 
         for i, line in enumerate(lines):
-            # Accept labelled fields such as "Station Name: Ratnagiri".
             station_match = re.search(
                 r"(?i)\b(?:station\s*name|station)\s*[:#=-]?\s*(.+)$", line
             )
@@ -288,7 +286,6 @@ def train_calibration_model():
             except Exception:
                 continue
 
-    # If at least one reference image is available, preserve it for nearest-neighbour fallback.
     if len(X) > 0:
         X = np.asarray(X, dtype=float)
         Y_MAX = np.asarray(Y_MAX, dtype=float)
@@ -348,13 +345,11 @@ def predict_temperature(features, model):
     observed_max = max(value["max"] for value in OEM_DATA.values())
 
     if model is None:
-        # Last-resort estimate based on the centre of the available OEM range.
         predicted_min = float(np.mean([v["min"] for v in OEM_DATA.values()]))
         predicted_max = float(np.mean([v["max"] for v in OEM_DATA.values()]))
     elif model.get("fallback", False):
         reference_features = model.get("fallback_X", np.empty((0, len(features))))
         if len(reference_features) > 0:
-            # Standardize each feature before selecting the most similar reference image.
             scale = np.std(reference_features, axis=0)
             scale[scale < 1e-9] = 1.0
             standardized_refs = (reference_features - np.mean(reference_features, axis=0)) / scale
@@ -364,7 +359,6 @@ def predict_temperature(features, model):
             predicted_max = float(model["fallback_max"][nearest])
             predicted_min = float(model["fallback_min"][nearest])
         else:
-            # No usable calibration files: provide a clearly labelled rough baseline estimate.
             predicted_min = float(np.mean([v["min"] for v in OEM_DATA.values()]))
             predicted_max = float(np.mean([v["max"] for v in OEM_DATA.values()]))
     else:
@@ -701,7 +695,6 @@ if analyze_button:
                             use_container_width=True
                         )
 
-            # Save each image and its location details.
             record_id = None
             try:
                 record_id = save_inspection(
@@ -712,4 +705,216 @@ if analyze_button:
                     minimum=minimum,
                     maximum=maximum,
                     source=source,
-                    station_name=station_
+                    station_name=station_name,
+                    ohe_mast_number=ohe_mast_number
+                )
+                st.success(f"Saved to database. Record ID: {record_id}")
+            except Exception as error:
+                st.error(
+                    f"Could not save this inspection to the database: {error}"
+                )
+
+            if minimum is not None and maximum is not None:
+                difference = maximum - minimum
+                status, recommendation = get_decision(difference)
+            else:
+                difference = None
+                status = "NOT ANALYZED"
+                recommendation = "Temperature information unavailable."
+
+            results.append({
+                "Record ID": record_id,
+                "Station Name": station_name,
+                "OHE Mast Number": ohe_mast_number,
+                "Record Image": uploaded_file.name,
+                "Image ID": image_id,
+                "Image Date/Time": (
+                    image_datetime.isoformat()
+                    if image_datetime is not None else None
+                ),
+                "Temperature Source": source,
+                "Minimum (°C)": minimum,
+                "Maximum (°C)": maximum,
+                "Difference (°C)": difference,
+                "Decision": status,
+                "Recommendation": recommendation
+            })
+
+        if results:
+            st.divider()
+            st.header("📊 Current Batch Summary")
+            result_df = pd.DataFrame(results)
+            st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                result_df.to_excel(writer, index=False, sheet_name="Batch Analysis")
+            excel_buffer.seek(0)
+
+            st.download_button(
+                "⬇️ Download Analysis Report (.xlsx)",
+                data=excel_buffer,
+                file_name="KRCL_Thermal_Analysis_Report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+
+# ============================================================
+# INSPECTION HISTORY
+# ============================================================
+
+st.divider()
+st.header("📚 Inspection History")
+st.write("View previously saved images and their inspection records.")
+
+if st.button("Refresh Inspection History"):
+    if not database_ready:
+        st.error("Database is unavailable.")
+    else:
+        try:
+            connection = get_database_connection()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            id,
+                            image_filename,
+                            image_id,
+                            station_name,
+                            ohe_mast_number,
+                            image_datetime,
+                            uploaded_at,
+                            minimum_temperature,
+                            maximum_temperature,
+                            temperature_difference,
+                            mean_temperature,
+                            fault_status,
+                            recommendation,
+                            temperature_source
+                        FROM thermal_inspections
+                        ORDER BY uploaded_at DESC;
+                        """
+                    )
+                    rows = cursor.fetchall()
+
+                    columns = [
+                        "Record ID",
+                        "Image",
+                        "Image ID",
+                        "Station Name",
+                        "OHE Mast Number",
+                        "Image Date/Time",
+                        "Uploaded At",
+                        "Minimum (°C)",
+                        "Maximum (°C)",
+                        "Difference (°C)",
+                        "Mean (°C)",
+                        "Decision",
+                        "Recommendation",
+                        "Temperature Source"
+                    ]
+                    history_df = pd.DataFrame(rows, columns=columns)
+            finally:
+                connection.close()
+
+            st.session_state["inspection_history"] = history_df
+        except Exception as error:
+            st.error(f"Could not load inspection history: {error}")
+
+
+if "inspection_history" in st.session_state:
+    history_df = st.session_state["inspection_history"]
+
+    if history_df.empty:
+        st.info("No inspection records found.")
+    else:
+        filter_options = ["All", "FAULT", "NO FAULT", "NOT ANALYZED"]
+        selected_status = st.selectbox("Filter by decision", filter_options)
+
+        if selected_status != "All":
+            filtered_df = history_df[
+                history_df["Decision"] == selected_status
+            ]
+        else:
+            filtered_df = history_df
+
+        st.dataframe(
+            filtered_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        history_buffer = io.BytesIO()
+        with pd.ExcelWriter(history_buffer, engine="openpyxl") as writer:
+            filtered_df.to_excel(writer, index=False, sheet_name="Inspection History")
+        history_buffer.seek(0)
+
+        st.download_button(
+            "⬇️ Download Inspection History (.xlsx)",
+            data=history_buffer,
+            file_name="KRCL_Inspection_History.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.subheader("Retrieve Stored Image")
+        selected_record = st.number_input(
+            "Enter Record ID",
+            min_value=1,
+            step=1
+        )
+
+        if st.button("View Stored Image"):
+            try:
+                connection = get_database_connection()
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT image_filename, image_data
+                            FROM thermal_inspections
+                            WHERE id = %s;
+                            """,
+                            (int(selected_record),)
+                        )
+                        stored_row = cursor.fetchone()
+                finally:
+                    connection.close()
+
+                if stored_row is None:
+                    st.warning("No image exists for that record ID.")
+                else:
+                    stored_filename = stored_row[0]
+                    stored_bytes = bytes(stored_row[1])
+                    st.write(f"**Original filename:** {stored_filename}")
+                    stored_image = Image.open(io.BytesIO(stored_bytes))
+                    st.image(
+                        stored_image,
+                        caption=stored_filename,
+                        use_container_width=True
+                    )
+            except Exception as error:
+                st.error(f"Could not retrieve stored image: {error}")
+
+
+# ============================================================
+# OEM VALIDATION TABLE
+# ============================================================
+
+st.divider()
+st.header("🔬 OEM Reference Dataset")
+
+validation = []
+for image_id, values in OEM_DATA.items():
+    difference = values["max"] - values["min"]
+    status, _ = get_decision(difference)
+    validation.append({
+        "Image ID": image_id,
+        "OEM Maximum (°C)": values["max"],
+        "OEM Minimum (°C)": values["min"],
+        "OEM Difference (°C)": round(difference, 1),
+        "Decision": status
+    })
+
+validation_df = pd.DataFrame(validation)
+st.dataframe(validation_df, use_container_width=True, hide_index=True)
