@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 from PIL import Image
 import numpy as np
@@ -65,7 +66,8 @@ def get_database_connection():
 
     if not database_url:
         raise RuntimeError(
-            "DATABASE_URL is missing. Configure it in Streamlit Cloud Secrets."
+            "DATABASE_URL is missing. Configure it in "
+            "Streamlit Cloud Secrets."
         )
 
     return psycopg2.connect(database_url)
@@ -119,7 +121,7 @@ def initialize_database():
 
 
 # ============================================================
-# TIMESTAMP EXTRACTION
+# TIMESTAMP EXTRACTION FROM FILENAME
 # ============================================================
 
 def extract_image_timestamp(filename):
@@ -130,7 +132,9 @@ def extract_image_timestamp(filename):
     Interpret the timestamp as India Standard Time.
     """
 
-    name = os.path.splitext(os.path.basename(filename))[0]
+    name = os.path.splitext(
+        os.path.basename(filename)
+    )[0]
 
     match = re.search(
         r"(?<!\d)(\d{8})-(\d{6})-(\d+)(?!\d)",
@@ -159,9 +163,7 @@ def extract_image_timestamp(filename):
 # ============================================================
 
 def extract_station_and_mast_from_image(image):
-    """
-    Detect labelled station names and mast numbers using OCR.
-    """
+    """Detect labelled station names and mast numbers using OCR."""
 
     try:
         rgb = np.array(image.convert("RGB"))
@@ -206,7 +208,9 @@ def extract_station_and_mast_from_image(image):
             for line in text.splitlines()
         ]
 
-        lines = [line for line in lines if line]
+        lines = [
+            line for line in lines if line
+        ]
 
         station_name = None
         mast_number = None
@@ -214,20 +218,26 @@ def extract_station_and_mast_from_image(image):
         for i, line in enumerate(lines):
 
             station_match = re.search(
-                r"(?i)\b(?:station\s*name|station)\s*[:#=-]?\s*(.+)$",
+                r"(?i)\b(?:station\s*name|station)"
+                r"\s*[:#=-]?\s*(.+)$",
                 line
             )
 
             if station_match:
-                value = station_match.group(1).strip(" :#=-")
+
+                value = station_match.group(1).strip(
+                    " :#=-"
+                )
 
                 if value and not re.fullmatch(
                     r"(?i)(name|no\.?|number)",
                     value
                 ):
+
                     station_name = value[:100]
 
                 elif i + 1 < len(lines):
+
                     station_name = lines[i + 1][:100]
 
             mast_match = re.search(
@@ -239,6 +249,7 @@ def extract_station_and_mast_from_image(image):
             )
 
             if mast_match:
+
                 mast_number = mast_match.group(1)[:50]
 
             elif re.search(
@@ -271,6 +282,7 @@ def extract_station_and_mast_from_image(image):
 # ============================================================
 
 def clean_filename(filename):
+
     name = os.path.splitext(
         os.path.basename(filename)
     )[0]
@@ -279,12 +291,14 @@ def clean_filename(filename):
 
 
 def find_oem_reference(filename):
+
     filename = clean_filename(filename)
 
     if filename in OEM_DATA:
         return OEM_DATA[filename]
 
     for image_id in OEM_DATA:
+
         if image_id in filename:
             return OEM_DATA[image_id]
 
@@ -308,7 +322,10 @@ def get_analysis_region(image):
     top = int(height * 0.08)
     bottom = int(height * 0.92)
 
-    return image_array[top:bottom, left:right]
+    return image_array[
+        top:bottom,
+        left:right
+    ]
 
 
 def extract_features(image):
@@ -476,11 +493,15 @@ def predict_temperature(features, model):
     if model is None:
 
         predicted_min = float(
-            np.mean([v["min"] for v in OEM_DATA.values()])
+            np.mean([
+                v["min"] for v in OEM_DATA.values()
+            ])
         )
 
         predicted_max = float(
-            np.mean([v["max"] for v in OEM_DATA.values()])
+            np.mean([
+                v["max"] for v in OEM_DATA.values()
+            ])
         )
 
     elif model.get("fallback", False):
@@ -530,11 +551,15 @@ def predict_temperature(features, model):
         else:
 
             predicted_min = float(
-                np.mean([v["min"] for v in OEM_DATA.values()])
+                np.mean([
+                    v["min"] for v in OEM_DATA.values()
+                ])
             )
 
             predicted_max = float(
-                np.mean([v["max"] for v in OEM_DATA.values()])
+                np.mean([
+                    v["max"] for v in OEM_DATA.values()
+                ])
             )
 
     else:
@@ -554,14 +579,25 @@ def predict_temperature(features, model):
         )
 
     if predicted_min > predicted_max:
-        predicted_min, predicted_max = predicted_max, predicted_min
+        predicted_min, predicted_max = (
+            predicted_max,
+            predicted_min
+        )
 
     predicted_min = float(
-        np.clip(predicted_min, observed_min, observed_max)
+        np.clip(
+            predicted_min,
+            observed_min,
+            observed_max
+        )
     )
 
     predicted_max = float(
-        np.clip(predicted_max, observed_min, observed_max)
+        np.clip(
+            predicted_max,
+            observed_min,
+            observed_max
+        )
     )
 
     return predicted_min, predicted_max
@@ -651,10 +687,13 @@ def display_result(
         st.write(f"**Image ID:** {image_id}")
 
     if status == "FAULT":
+
         st.error(
             "🔴 FAULT — ATTENTION REQUIRED WITHIN 2 DAYS"
         )
+
     else:
+
         st.success("🟢 NO FAULT")
 
     st.write(f"**Recommendation:** {recommendation}")
@@ -1163,7 +1202,7 @@ if analyze_button:
 
 
 # ============================================================
-# NEW: DOWNLOAD THE ENTIRE SUPABASE TABLE AS EXCEL
+# DOWNLOAD THE ENTIRE SUPABASE TABLE AS EXCEL
 # ============================================================
 
 st.divider()
@@ -1177,7 +1216,8 @@ st.write(
 
 if st.button(
     "Prepare Full Supabase Excel Export",
-    type="primary"
+    type="primary",
+    key="prepare_full_supabase_export"
 ):
 
     if not database_ready:
@@ -1187,6 +1227,8 @@ if st.button(
         )
 
     else:
+
+        connection = None
 
         try:
 
@@ -1232,42 +1274,45 @@ if st.button(
                 finally:
 
                     connection.close()
+                    connection = None
 
-                full_df = pd.DataFrame(rows, columns=columns)
+                full_df = pd.DataFrame(
+                    rows,
+                    columns=columns
+                )
 
-# Convert timezone-aware datetime columns to Excel-compatible values.
+                # Convert timestamps to IST and remove timezone
+                # information because Excel does not support
+                # timezone-aware datetimes.
+                for column in [
+                    "image_datetime",
+                    "uploaded_at"
+                ]:
 
-for column in ["image_datetime", "uploaded_at"]:
-if column in full_df.columns:
-full_df[column] = pd.to_datetime(
-full_df[column], errors="coerce", utc=True
-).dt.tz_localize(None)
+                    if column in full_df.columns:
 
-# Replace binary image data with a readable description.
+                        full_df[column] = (
+                            pd.to_datetime(
+                                full_df[column],
+                                errors="coerce",
+                                utc=True
+                            )
+                            .dt.tz_convert("Asia/Kolkata")
+                            .dt.tz_localize(None)
+                        )
 
-# The original images remain stored in Supabase.
-
-if "image_data" in full_df.columns:
-full_df["image_data"] = full_df["image_data"].apply(
-lambda value: (
-f"[Image stored in Supabase: {len(bytes(value))} bytes]"
-if value is not None else None
-)
-)
-
-
-                # Excel should not contain the raw binary image.
-                # Keep the image in Supabase and export a description.
+                # Replace raw binary data with a readable description.
+                # The original images remain stored in Supabase.
                 if "image_data" in full_df.columns:
 
-                    full_df["image_data"] = full_df[
-                        "image_data"
-                    ].apply(
-                        lambda value: (
-                            f"[Image stored in Supabase: "
-                            f"{len(bytes(value))} bytes]"
-                            if value is not None
-                            else None
+                    full_df["image_data"] = (
+                        full_df["image_data"].apply(
+                            lambda value: (
+                                "[Image stored in Supabase: "
+                                f"{len(bytes(value))} bytes]"
+                                if value is not None
+                                else None
+                            )
                         )
                     )
 
@@ -1295,7 +1340,7 @@ if value is not None else None
                 ] = len(full_df)
 
             st.success(
-                "Excel export prepared successfully. "
+                "Excel export prepared successfully! "
                 f"Total records: {len(full_df)}"
             )
 
@@ -1304,6 +1349,11 @@ if value is not None else None
             st.error(
                 f"Could not export the Supabase table: {error}"
             )
+
+        finally:
+
+            if connection is not None:
+                connection.close()
 
 
 if "full_supabase_excel" in st.session_state:
@@ -1321,7 +1371,7 @@ if "full_supabase_excel" in st.session_state:
 
     st.caption(
         "Exported records: "
-        f"{st.session_state['full_supabase_excel_count']}"
+        f"{st.session_state.get('full_supabase_excel_count', 0)}"
     )
 
 
@@ -1400,6 +1450,24 @@ if st.button("Refresh Inspection History"):
             finally:
 
                 connection.close()
+
+            # Convert timezone-aware values for display and download.
+            for column in [
+                "Image Date/Time",
+                "Uploaded At"
+            ]:
+
+                if column in history_df.columns:
+
+                    history_df[column] = (
+                        pd.to_datetime(
+                            history_df[column],
+                            errors="coerce",
+                            utc=True
+                        )
+                        .dt.tz_convert("Asia/Kolkata")
+                        .dt.tz_localize(None)
+                    )
 
             st.session_state[
                 "inspection_history"
@@ -1485,6 +1553,8 @@ if "inspection_history" in st.session_state:
 
         if st.button("View Stored Image"):
 
+            connection = None
+
             try:
 
                 connection = get_database_connection()
@@ -1504,6 +1574,7 @@ if "inspection_history" in st.session_state:
                 finally:
 
                     connection.close()
+                    connection = None
 
                 if stored_row is None:
 
@@ -1535,6 +1606,11 @@ if "inspection_history" in st.session_state:
                 st.error(
                     f"Could not retrieve stored image: {error}"
                 )
+
+            finally:
+
+                if connection is not None:
+                    connection.close()
 
 
 # ============================================================
@@ -1568,3 +1644,4 @@ st.dataframe(
     use_container_width=True,
     hide_index=True
 )
+```
