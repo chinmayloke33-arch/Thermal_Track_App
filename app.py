@@ -1233,10 +1233,28 @@ if st.button(
 
                     connection.close()
 
-                full_df = pd.DataFrame(
-                    rows,
-                    columns=columns
-                )
+                full_df = pd.DataFrame(rows, columns=columns)
+
+# Convert timezone-aware datetime columns to Excel-compatible values.
+
+for column in ["image_datetime", "uploaded_at"]:
+if column in full_df.columns:
+full_df[column] = pd.to_datetime(
+full_df[column], errors="coerce", utc=True
+).dt.tz_localize(None)
+
+# Replace binary image data with a readable description.
+
+# The original images remain stored in Supabase.
+
+if "image_data" in full_df.columns:
+full_df["image_data"] = full_df["image_data"].apply(
+lambda value: (
+f"[Image stored in Supabase: {len(bytes(value))} bytes]"
+if value is not None else None
+)
+)
+
 
                 # Excel should not contain the raw binary image.
                 # Keep the image in Supabase and export a description.
