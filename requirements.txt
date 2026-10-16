@@ -1,11 +1,10 @@
-streamlit==1.32.0
-numpy==1.26.4
-opencv-python-headless==4.9.0.80
-pandas==2.2.1
-psycopg2-binary==2.9.9
-pytesseract==0.3.10
-Pillow==10.2.0
-openpyxl==3.1.2
-
+streamlit
+numpy
+opencv-python-headless
+pandas
+psycopg2-binary
+pytesseract
+Pillow
+openpyxl
 
 
