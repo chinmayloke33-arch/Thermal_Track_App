@@ -1,10 +1,11 @@
 streamlit
-Pillow
 numpy
 opencv-python-headless
 pandas
 psycopg2-binary
 pytesseract
+Pillow
+openpyxl
 
 
 
