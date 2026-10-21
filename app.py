@@ -51,7 +51,7 @@ OEM_DATA = {
 
 
 # ============================================================
-# PREMIUM INTERFACE
+# PREMIUM DARK UI
 # ============================================================
 
 st.markdown(
@@ -161,33 +161,6 @@ st.markdown(
         margin-top: 8px;
     }
 
-    .status-good {
-        background: #10382e;
-        border: 1px solid #247b5e;
-        color: #78efbd;
-        padding: 15px;
-        border-radius: 12px;
-        font-weight: 700;
-    }
-
-    .status-bad {
-        background: #411d29;
-        border: 1px solid #9b3c50;
-        color: #ff9eaa;
-        padding: 15px;
-        border-radius: 12px;
-        font-weight: 700;
-    }
-
-    .status-neutral {
-        background: #202d41;
-        border: 1px solid #42546c;
-        color: #d7e4f5;
-        padding: 15px;
-        border-radius: 12px;
-        font-weight: 700;
-    }
-
     .info-card {
         background: #111d30;
         border: 1px solid #263952;
@@ -205,11 +178,6 @@ st.markdown(
     .info-card p {
         color: #a8bad0;
         font-size: 13px;
-    }
-
-    .small-label {
-        color: #90a5c0;
-        font-size: 12px;
     }
 
     div[data-testid="stMetric"] {
@@ -244,15 +212,6 @@ st.markdown(
     .stButton > button:hover {
         border-color: #53dce6;
         color: white;
-    }
-
-    .stTextInput input,
-    .stNumberInput input,
-    .stSelectbox div[data-baseweb="select"],
-    .stDateInput input {
-        background: #111d30;
-        color: white;
-        border-radius: 9px;
     }
 
     [data-testid="stFileUploader"] {
@@ -350,7 +309,7 @@ def initialize_database():
 
 
 # ============================================================
-# FILE AND IMAGE UTILITIES
+# IMAGE UTILITIES
 # ============================================================
 
 def get_image_hash(image_bytes):
@@ -385,24 +344,16 @@ def extract_image_timestamp(filename):
 
 
 def extract_station_and_mast_from_image(image):
-    """
-    OCR attempts to find station and OHE mast information.
-
-    OCR is not guaranteed to read every image correctly.
-    Users can enter missing details manually.
-    """
-
     raw_text = ""
 
     try:
         rgb = np.array(image.convert("RGB"))
 
-        candidates = [
+        gray = cv2.cvtColor(
             rgb,
-            cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        ]
+            cv2.COLOR_RGB2GRAY
+        )
 
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         enlarged = cv2.resize(
             gray,
             None,
@@ -418,7 +369,11 @@ def extract_station_and_mast_from_image(image):
             cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
 
-        candidates.append(thresholded)
+        candidates = [
+            rgb,
+            gray,
+            thresholded
+        ]
 
         texts = []
 
@@ -454,14 +409,22 @@ def extract_station_and_mast_from_image(image):
     ]
 
     for pattern in station_patterns:
-        match = re.search(pattern, raw_text, re.IGNORECASE)
+        match = re.search(
+            pattern,
+            raw_text,
+            re.IGNORECASE
+        )
 
         if match:
             station = match.group(1).strip()
             break
 
     for pattern in mast_patterns:
-        match = re.search(pattern, raw_text, re.IGNORECASE)
+        match = re.search(
+            pattern,
+            raw_text,
+            re.IGNORECASE
+        )
 
         if match:
             mast = match.group(1).strip()
@@ -486,14 +449,21 @@ def get_analysis_region(image):
 
 
 # ============================================================
-# TEMPERATURE FEATURE EXTRACTION
+# FEATURE EXTRACTION
 # ============================================================
 
 def extract_features(image):
     region = get_analysis_region(image)
 
-    hsv = cv2.cvtColor(region, cv2.COLOR_RGB2HSV)
-    lab = cv2.cvtColor(region, cv2.COLOR_RGB2LAB)
+    hsv = cv2.cvtColor(
+        region,
+        cv2.COLOR_RGB2HSV
+    )
+
+    lab = cv2.cvtColor(
+        region,
+        cv2.COLOR_RGB2LAB
+    )
 
     h, s, v = cv2.split(hsv)
     l, a, b = cv2.split(lab)
@@ -531,13 +501,6 @@ def extract_features(image):
 # ============================================================
 
 def train_calibration_model():
-    """
-    Train only when calibration_images contains images whose
-    filenames correspond to the OEM_DATA keys.
-
-    Otherwise, return None and use a clearly labelled fallback.
-    """
-
     calibration_dir = "calibration_images"
 
     if not os.path.isdir(calibration_dir):
@@ -547,7 +510,10 @@ def train_calibration_model():
     targets = []
 
     for filename in os.listdir(calibration_dir):
-        path = os.path.join(calibration_dir, filename)
+        path = os.path.join(
+            calibration_dir,
+            filename
+        )
 
         if not filename.lower().endswith(
             (".jpg", ".jpeg", ".png", ".bmp")
@@ -561,7 +527,10 @@ def train_calibration_model():
 
         try:
             image = Image.open(path).convert("RGB")
-            feature_rows.append(extract_features(image))
+
+            feature_rows.append(
+                extract_features(image)
+            )
 
             targets.append([
                 OEM_DATA[stem]["min"],
@@ -588,9 +557,7 @@ def train_calibration_model():
         X_scaled
     ])
 
-    alpha = 10.0
-
-    penalty = np.eye(X_design.shape[1]) * alpha
+    penalty = np.eye(X_design.shape[1]) * 10.0
     penalty[0, 0] = 0
 
     try:
@@ -610,12 +577,6 @@ def train_calibration_model():
 
 
 def predict_temperature(features, model):
-    """
-    Returns minimum and maximum estimates.
-
-    These are not certified radiometric measurements.
-    """
-
     if model is not None:
         scaled = (
             features - model["mean"]
@@ -623,7 +584,9 @@ def predict_temperature(features, model):
 
         design = np.concatenate([[1.0], scaled])
 
-        predictions = design @ model["coefficients"]
+        predictions = (
+            design @ model["coefficients"]
+        )
 
         minimum = float(predictions[0])
         maximum = float(predictions[1])
@@ -632,27 +595,38 @@ def predict_temperature(features, model):
             minimum, maximum = maximum, minimum
 
         minimum = float(np.clip(minimum, 0, 40))
-        maximum = float(np.clip(maximum, 0, 40))
+        maximum = float(np.clip(maximum, minimum, 40))
 
-        return minimum, maximum, "Calibration model estimate"
+        return (
+            minimum,
+            maximum,
+            "Calibration model estimate"
+        )
 
-    # Fallback when no valid calibration model exists.
-    # These values are approximations, not actual measurements.
-    v_mean = features[4]
+    # Fallback: colour-based estimate.
+    # This is not equivalent to radiometric measurement.
     v_low = features[12]
     v_high = features[16]
 
-    minimum = 7.2 + (v_low / 255.0) * (39.5 - 7.2)
-    maximum = 7.2 + (v_high / 255.0) * (39.5 - 7.2)
+    minimum = 7.2 + (
+        v_low / 255.0
+    ) * (39.5 - 7.2)
+
+    maximum = 7.2 + (
+        v_high / 255.0
+    ) * (39.5 - 7.2)
 
     if minimum > maximum:
         minimum, maximum = maximum, minimum
 
-    # Keep ordering and bounds consistent.
     minimum = float(np.clip(minimum, 0, 40))
     maximum = float(np.clip(maximum, minimum, 40))
 
-    return minimum, maximum, "Unvalidated color-based estimate"
+    return (
+        minimum,
+        maximum,
+        "Unvalidated color-based estimate"
+    )
 
 
 # ============================================================
@@ -669,7 +643,7 @@ def get_decision(delta):
     if delta < FAULT_THRESHOLD:
         return (
             "NO FAULT",
-            "No threshold exceedance indicated by this analysis."
+            "Below the configured temperature-difference threshold."
         )
 
     return (
@@ -680,7 +654,7 @@ def get_decision(delta):
 
 
 # ============================================================
-# DATABASE SAVE AND RETRIEVAL
+# DATABASE SAVE / READ
 # ============================================================
 
 def save_inspection(
@@ -773,7 +747,9 @@ def load_inspections(limit=1000):
     conn = get_database_connection()
 
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(
+            cursor_factory=RealDictCursor
+        ) as cur:
             cur.execute(
                 """
                 SELECT
@@ -801,7 +777,9 @@ def load_inspections(limit=1000):
 
             rows = cur.fetchall()
 
-        return pd.DataFrame([dict(row) for row in rows])
+        return pd.DataFrame([
+            dict(row) for row in rows
+        ])
 
     finally:
         conn.close()
@@ -833,7 +811,9 @@ def load_all_export_records():
     conn = get_database_connection()
 
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with conn.cursor(
+            cursor_factory=RealDictCursor
+        ) as cur:
             cur.execute(
                 """
                 SELECT
@@ -860,30 +840,93 @@ def load_all_export_records():
 
             rows = cur.fetchall()
 
-        return pd.DataFrame([dict(row) for row in rows])
+        return pd.DataFrame([
+            dict(row) for row in rows
+        ])
 
     finally:
         conn.close()
 
 
 # ============================================================
-# EXPORT UTILITIES
+# EXCEL EXPORT — TIMEZONE FIX INCLUDED
 # ============================================================
 
-def dataframe_to_excel(dataframe, sheet_name="Inspections"):
+def dataframe_to_excel(
+    dataframe,
+    sheet_name="Inspections"
+):
+    """
+    Convert a DataFrame to Excel safely.
+
+    Excel does not support timezone-aware timestamps.
+    This function converts them to Asia/Kolkata local time
+    and removes timezone metadata from the exported copy.
+
+    The original DataFrame and database values are unchanged.
+    """
+
     output = io.BytesIO()
+    export_df = dataframe.copy()
+
+    for column in export_df.columns:
+
+        # Handle timezone-aware Pandas datetime columns.
+        if isinstance(
+            export_df[column].dtype,
+            pd.DatetimeTZDtype
+        ):
+            export_df[column] = (
+                export_df[column]
+                .dt.tz_convert("Asia/Kolkata")
+                .dt.tz_localize(None)
+            )
+
+        # Handle object columns containing Python datetimes.
+        elif export_df[column].dtype == "object":
+
+            def excel_safe_value(value):
+
+                if isinstance(
+                    value,
+                    (datetime, pd.Timestamp)
+                ):
+                    if value.tzinfo is not None:
+                        value = (
+                            value.astimezone(IST)
+                            .replace(tzinfo=None)
+                        )
+
+                    return value
+
+                # Never try to store raw binary data in Excel.
+                if isinstance(
+                    value,
+                    (bytes, bytearray, memoryview)
+                ):
+                    return (
+                        f"[Binary data: {len(value)} bytes]"
+                    )
+
+                return value
+
+            export_df[column] = (
+                export_df[column].map(excel_safe_value)
+            )
 
     with pd.ExcelWriter(
         output,
         engine="openpyxl"
     ) as writer:
-        dataframe.to_excel(
+
+        export_df.to_excel(
             writer,
             index=False,
             sheet_name=sheet_name[:31]
         )
 
     output.seek(0)
+
     return output.getvalue()
 
 
@@ -891,7 +934,11 @@ def dataframe_to_excel(dataframe, sheet_name="Inspections"):
 # SHARED UI COMPONENTS
 # ============================================================
 
-def render_hero(title, subtitle, eyebrow="KRCL • THERMAL INTELLIGENCE"):
+def render_hero(
+    title,
+    subtitle,
+    eyebrow="KRCL • THERMAL INTELLIGENCE"
+):
     st.markdown(
         f"""
         <div class="hero">
@@ -930,15 +977,8 @@ def section_heading(title, caption=None):
         )
 
 
-def get_temperature_source_for_known_image(image_id):
-    if image_id and image_id in OEM_DATA:
-        return "OEM reference"
-
-    return None
-
-
 # ============================================================
-# APPLICATION STARTUP
+# SIDEBAR
 # ============================================================
 
 st.sidebar.markdown(
@@ -975,13 +1015,13 @@ page = st.sidebar.radio(
         "OEM Validation",
         "System Status"
     ],
-    index=0
+    key="navigation_page"
 )
 
 st.sidebar.markdown("---")
 
 st.sidebar.markdown(
-    """
+    f"""
     <div style="background:#111d30; border:1px solid #263952;
                 padding:14px; border-radius:12px;">
         <div style="font-size:11px; color:#91a5bf;">
@@ -989,7 +1029,7 @@ st.sidebar.markdown(
         </div>
         <div style="font-size:25px; color:#56e0e8;
                     font-weight:800; margin-top:4px;">
-            5.0 °C
+            {FAULT_THRESHOLD:.1f} °C
         </div>
         <div style="font-size:11px; color:#91a5bf;">
             Configured temperature difference
@@ -1010,6 +1050,11 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True
 )
+
+
+# ============================================================
+# DATABASE STATUS
+# ============================================================
 
 db_ready = False
 db_error = None
@@ -1053,16 +1098,15 @@ if page == "Dashboard":
         st.code(str(e))
         st.stop()
 
+    total = len(history)
+
     if history.empty:
-        total = 0
         faults = 0
         no_faults = 0
         pending = 0
         recent = history
 
     else:
-        total = len(history)
-
         faults = int(
             (history["fault_status"] == "FAULT").sum()
         )
@@ -1145,7 +1189,7 @@ if page == "Dashboard":
             """
             <div class="info-card">
                 <h4>⚡ Quick Actions</h4>
-                <p>Upload and process a thermal image.</p>
+                <p>Open the analysis workspace or inspect saved records.</p>
             </div>
             """,
             unsafe_allow_html=True
@@ -1156,7 +1200,7 @@ if page == "Dashboard":
             type="primary",
             use_container_width=True
         ):
-            st.session_state["requested_page"] = (
+            st.session_state["navigation_page"] = (
                 "Thermal Analysis Studio"
             )
             st.rerun()
@@ -1165,15 +1209,12 @@ if page == "Dashboard":
             "View Inspection History",
             use_container_width=True
         ):
-            st.session_state["requested_page"] = (
+            st.session_state["navigation_page"] = (
                 "Inspection History"
             )
             st.rerun()
 
-    section_heading(
-        "Latest Inspections",
-        "The eight most recently saved records."
-    )
+    section_heading("Latest Inspections")
 
     if not recent.empty:
         display_columns = [
@@ -1198,6 +1239,7 @@ if page == "Dashboard":
             use_container_width=True,
             hide_index=True
         )
+
     else:
         st.info("No inspections have been saved.")
 
@@ -1211,19 +1253,18 @@ elif page == "Thermal Analysis Studio":
     render_hero(
         "Thermal Analysis Studio",
         "Upload inspection images, capture OHE location details "
-        "and generate an inspection record."
+        "and generate inspection records."
     )
 
     st.markdown(
         """
         <div class="info-card">
-            <h4>Before you analyse</h4>
+            <h4>Inspection reminder</h4>
             <p>
-                Temperature estimates derived from ordinary image
-                colours are not equivalent to radiometric thermal
-                measurements. Validate results against approved
-                equipment and engineering procedures before using
-                them for operational decisions.
+                Temperature estimates from ordinary image colours
+                are not equivalent to radiometric thermal measurements.
+                Validate results against approved equipment and
+                engineering procedures before operational use.
             </p>
         </div>
         """,
@@ -1233,11 +1274,11 @@ elif page == "Thermal Analysis Studio":
     uploaded_files = st.file_uploader(
         "Upload thermal inspection images",
         type=["jpg", "jpeg", "png", "bmp"],
-        accept_multiple_files=True,
-        help="You can upload multiple inspection images."
+        accept_multiple_files=True
     )
 
     if uploaded_files:
+
         section_heading(
             "Inspection Location",
             "Enter the location information for this batch."
@@ -1248,27 +1289,26 @@ elif page == "Thermal Analysis Studio":
         with col1:
             station_name_input = st.text_input(
                 "Station name",
-                placeholder="e.g. Ratnagiri"
+                placeholder="e.g. Ratnagiri",
+                key="analysis_station"
             )
 
         with col2:
             mast_number_input = st.text_input(
                 "OHE mast number",
-                placeholder="e.g. 124/7"
+                placeholder="e.g. 124/7",
+                key="analysis_mast"
             )
 
-        analyze_button = st.button(
+        if st.button(
             "Analyse Images & Save Records",
             type="primary",
             use_container_width=True
-        )
-
-        if analyze_button:
+        ):
 
             if not db_ready:
                 st.error(
-                    "Database unavailable. Configure DATABASE_URL "
-                    "before analysing images."
+                    "Database unavailable. Check DATABASE_URL."
                 )
 
             else:
@@ -1303,7 +1343,7 @@ elif page == "Thermal Analysis Studio":
                             extract_image_timestamp(filename)
                         )
 
-                        ocr_station, ocr_mast, ocr_text = (
+                        ocr_station, ocr_mast, _ = (
                             extract_station_and_mast_from_image(
                                 image
                             )
@@ -1418,17 +1458,14 @@ elif page == "Thermal Analysis Studio":
                 st.session_state["batch_results"] = batch_results
 
                 st.success(
-                    "Batch processing completed. Successfully "
-                    "saved records are available in Inspection History."
+                    "Batch processing completed. Successfully saved "
+                    "records are available in Inspection History."
                 )
 
                 st.rerun()
 
     if "batch_results" in st.session_state:
-        section_heading(
-            "Batch Results",
-            "Results from the most recent processing run."
-        )
+        section_heading("Batch Results")
 
         results_df = pd.DataFrame(
             st.session_state["batch_results"]
@@ -1440,14 +1477,12 @@ elif page == "Thermal Analysis Studio":
             hide_index=True
         )
 
-        excel_data = dataframe_to_excel(
-            results_df,
-            "Batch Results"
-        )
-
         st.download_button(
             "Download Batch Results (Excel)",
-            data=excel_data,
+            data=dataframe_to_excel(
+                results_df,
+                "Batch Results"
+            ),
             file_name="KRCL_Thermal_Batch_Results.xlsx",
             mime=(
                 "application/vnd.openxmlformats-officedocument."
@@ -1465,7 +1500,7 @@ elif page == "Fault Monitor":
 
     render_hero(
         "Fault Monitor",
-        "Review saved records classified by the configured "
+        "Review records classified by the configured "
         "temperature-difference threshold."
     )
 
@@ -1523,7 +1558,10 @@ elif page == "Fault Monitor":
     section_heading("Fault Records")
 
     if faults.empty:
-        st.success("No saved records currently carry FAULT status.")
+        st.success(
+            "No saved records currently carry FAULT status."
+        )
+
     else:
         st.dataframe(
             faults,
@@ -1531,14 +1569,12 @@ elif page == "Fault Monitor":
             hide_index=True
         )
 
-        fault_export = dataframe_to_excel(
-            faults,
-            "Fault Records"
-        )
-
         st.download_button(
             "Download Fault Records",
-            data=fault_export,
+            data=dataframe_to_excel(
+                faults,
+                "Fault Records"
+            ),
             file_name="KRCL_Fault_Records.xlsx",
             mime=(
                 "application/vnd.openxmlformats-officedocument."
@@ -1569,7 +1605,7 @@ elif page == "Inspection History":
 
     render_hero(
         "Inspection History",
-        "Search saved inspection records and retrieve original images."
+        "Search saved records and retrieve original inspection images."
     )
 
     if not db_ready:
@@ -1682,12 +1718,14 @@ elif page == "Inspection History":
             if result:
                 image_filename, image_bytes = result
 
+                image_bytes = bytes(image_bytes)
+
                 st.success(
                     f"Retrieved image: {image_filename}"
                 )
 
                 retrieved_image = Image.open(
-                    io.BytesIO(bytes(image_bytes))
+                    io.BytesIO(image_bytes)
                 )
 
                 st.image(
@@ -1698,7 +1736,7 @@ elif page == "Inspection History":
 
                 st.download_button(
                     "Download Original Image",
-                    data=bytes(image_bytes),
+                    data=image_bytes,
                     file_name=image_filename,
                     mime="application/octet-stream"
                 )
@@ -1738,22 +1776,29 @@ elif page == "Analytics":
         st.stop()
 
     if history.empty:
-        st.info("Save inspection records to start seeing analytics.")
+        st.info(
+            "Save inspection records to start seeing analytics."
+        )
         st.stop()
 
     valid = history[
         history["temperature_difference"].notna()
     ].copy()
 
-    if not valid.empty:
-        avg_delta = valid["temperature_difference"].mean()
-        max_delta = valid["temperature_difference"].max()
-        avg_max = valid["maximum_temperature"].mean()
+    avg_delta = (
+        valid["temperature_difference"].mean()
+        if not valid.empty else None
+    )
 
-    else:
-        avg_delta = None
-        max_delta = None
-        avg_max = None
+    max_delta = (
+        valid["temperature_difference"].max()
+        if not valid.empty else None
+    )
+
+    avg_max = (
+        valid["maximum_temperature"].mean()
+        if not valid.empty else None
+    )
 
     c1, c2, c3 = st.columns(3)
 
@@ -1761,7 +1806,7 @@ elif page == "Analytics":
         render_metric(
             "AVERAGE DIFFERENCE",
             f"{avg_delta:.2f} °C" if avg_delta is not None else "N/A",
-            "Across records with temperature values"
+            "Records with temperature values"
         )
 
     with c2:
@@ -1775,7 +1820,7 @@ elif page == "Analytics":
         render_metric(
             "AVERAGE MAX TEMP",
             f"{avg_max:.2f} °C" if avg_max is not None else "N/A",
-            "Across records with temperature values"
+            "Records with temperature values"
         )
 
     section_heading("Fault Status Distribution")
@@ -1804,37 +1849,38 @@ elif page == "Analytics":
         )
 
         st.caption(
-            "The chart shows stored values, not independent "
-            "validation of their accuracy."
+            "This chart displays stored values and does not "
+            "independently validate their accuracy."
         )
 
     else:
-        st.info("No usable temperature differences are available.")
+        st.info(
+            "No usable temperature differences are available."
+        )
 
     section_heading("Station Summary")
 
-    if "station_name" in history.columns:
-        station_summary = (
-            history.groupby("station_name", dropna=False)
-            .agg(
-                Inspections=("id", "count"),
-                Faults=(
-                    "fault_status",
-                    lambda s: int((s == "FAULT").sum())
-                ),
-                Average_Difference=(
-                    "temperature_difference",
-                    "mean"
-                )
+    station_summary = (
+        history.groupby("station_name", dropna=False)
+        .agg(
+            Inspections=("id", "count"),
+            Faults=(
+                "fault_status",
+                lambda s: int((s == "FAULT").sum())
+            ),
+            Average_Difference=(
+                "temperature_difference",
+                "mean"
             )
-            .reset_index()
         )
+        .reset_index()
+    )
 
-        st.dataframe(
-            station_summary,
-            use_container_width=True,
-            hide_index=True
-        )
+    st.dataframe(
+        station_summary,
+        use_container_width=True,
+        hide_index=True
+    )
 
 
 # ============================================================
@@ -1870,10 +1916,8 @@ elif page == "Export Center":
 
     section_heading("Excel Export")
 
-    excel_df = export_df.copy()
-
     excel_bytes = dataframe_to_excel(
-        excel_df,
+        export_df,
         "Inspection Register"
     )
 
@@ -1943,8 +1987,7 @@ elif page == "OEM Validation":
 
     render_hero(
         "OEM Reference Validation",
-        "Review the reference dataset currently configured "
-        "inside the application."
+        "Review the reference dataset configured in the application."
     )
 
     oem_df = pd.DataFrame([
@@ -2006,6 +2049,7 @@ elif page == "OEM Validation":
     section_heading("Calibration Image Directory")
 
     if os.path.isdir("calibration_images"):
+
         calibration_files = [
             f for f in os.listdir("calibration_images")
             if f.lower().endswith(
@@ -2029,9 +2073,7 @@ elif page == "OEM Validation":
 
     else:
         st.warning(
-            "The calibration_images directory was not found. "
-            "The calibrated model will not be trained from "
-            "local calibration images."
+            "The calibration_images directory was not found."
         )
 
     st.markdown(
@@ -2039,10 +2081,9 @@ elif page == "OEM Validation":
         <div class="info-card">
             <h4>Validation note</h4>
             <p>
-                An OEM reference table is not, by itself, a complete
-                calibration dataset. Reliable validation requires
-                representative images, trusted temperature labels,
-                appropriate calibration and independent testing.
+                Reliable temperature validation requires representative
+                images, trusted temperature labels, suitable calibration
+                and independent testing.
             </p>
         </div>
         """,
@@ -2058,26 +2099,19 @@ elif page == "System Status":
 
     render_hero(
         "System Status",
-        "Review the runtime environment and connectivity checks."
+        "Review the application environment and database connection."
     )
-
-    section_heading("Application Environment")
 
     runtime = [
         {
-            "Component": "Python",
+            "Component": "NumPy",
             "Status": "Available",
-            "Details": "Application runtime"
+            "Details": np.__version__
         },
         {
             "Component": "OpenCV",
             "Status": "Available",
             "Details": cv2.__version__
-        },
-        {
-            "Component": "NumPy",
-            "Status": "Available",
-            "Details": np.__version__
         },
         {
             "Component": "Pandas",
@@ -2091,7 +2125,7 @@ elif page == "System Status":
                 if os.path.exists("/usr/bin/tesseract")
                 else "Check configuration"
             ),
-            "Details": "Used for station/mast text extraction"
+            "Details": "Station and mast text extraction"
         },
         {
             "Component": "Database",
@@ -2099,7 +2133,7 @@ elif page == "System Status":
                 "Connected" if db_ready else "Unavailable"
             ),
             "Details": (
-                "PostgreSQL/Supabase"
+                "PostgreSQL / Supabase"
                 if db_ready
                 else "Check DATABASE_URL in Streamlit Secrets"
             )
@@ -2115,7 +2149,10 @@ elif page == "System Status":
     if db_ready:
         st.success("Database connection successful.")
 
-        if st.button("Test Database Read", type="primary"):
+        if st.button(
+            "Test Database Read",
+            type="primary"
+        ):
             try:
                 history = load_inspections(limit=1)
 
