@@ -52,7 +52,7 @@ OEM_DATA = {
 
 
 # ============================================================
-# PREMIUM DARK UI
+# PREMIUM DARK UI — LIGHT UPLOAD BOX
 # ============================================================
 
 st.markdown(
@@ -189,11 +189,61 @@ st.markdown(
         border: none;
     }
 
+    /* ========================================================
+       UPLOAD BOX — WHITE BACKGROUND, DARK READABLE TEXT
+       ======================================================== */
+
     [data-testid="stFileUploader"] {
-        background: #111d30;
-        border: 1px dashed #3a647e;
-        border-radius: 14px;
-        padding: 12px;
+        background-color: #ffffff !important;
+        color: #1f2937 !important;
+        border: 1px solid #d1d5db !important;
+        border-radius: 14px !important;
+        padding: 12px !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] {
+        background-color: #ffffff !important;
+        border: 1px dashed #9ca3af !important;
+        border-radius: 10px !important;
+    }
+
+    [data-testid="stFileUploader"] label,
+    [data-testid="stFileUploaderDropzoneInstructions"],
+    [data-testid="stFileUploaderDropzoneInstructions"] *,
+    [data-testid="stFileUploader"] small,
+    [data-testid="stFileUploader"] p {
+        color: #1f2937 !important;
+    }
+
+    [data-testid="stFileUploader"] button {
+        background-color: #2563eb !important;
+        color: #ffffff !important;
+        border: 1px solid #1d4ed8 !important;
+        border-radius: 8px !important;
+        font-size: 16px !important;
+        font-weight: 700 !important;
+        padding: 8px 18px !important;
+    }
+
+    [data-testid="stFileUploader"] button,
+    [data-testid="stFileUploader"] button * {
+        color: #ffffff !important;
+    }
+
+    [data-testid="stFileUploaderFile"] {
+        background-color: #f3f4f6 !important;
+        border: 1px solid #d1d5db !important;
+        border-radius: 8px !important;
+    }
+
+    [data-testid="stFileUploaderFile"] *,
+    [data-testid="stFileUploaderFileName"] {
+        color: #1f2937 !important;
+    }
+
+    [data-testid="stFileUploaderFile"] button,
+    [data-testid="stFileUploaderFile"] button * {
+        color: #374151 !important;
     }
 
     hr {
@@ -1013,12 +1063,9 @@ PAGES = [
     "System Status"
 ]
 
-# Initialize state only if it does not exist.
 if "navigation_page" not in st.session_state:
     st.session_state["navigation_page"] = "Dashboard"
 
-# IMPORTANT:
-# Do not assign navigation_page anywhere below this widget.
 page = st.sidebar.radio(
     "NAVIGATION",
     PAGES,
@@ -1176,7 +1223,6 @@ if page == "Dashboard":
             unsafe_allow_html=True
         )
 
-        # Use callbacks; do not assign the radio key inside button blocks.
         st.button(
             "Open Thermal Analysis Studio",
             type="primary",
@@ -1297,7 +1343,6 @@ elif page == "Thermal Analysis Studio":
                         f"{filename}"
                     )
 
-                    # Default metadata for error handling.
                     image_id = None
                     image_datetime = None
                     station_name = NO_RECORD
@@ -1312,7 +1357,6 @@ elif page == "Thermal Analysis Studio":
                             extract_image_timestamp(filename)
                         )
 
-                        # OCR metadata only: no manual inputs.
                         ocr_station, ocr_mast, ocr_text = (
                             extract_station_and_mast_from_image(image)
                         )
@@ -1329,8 +1373,6 @@ elif page == "Thermal Analysis Studio":
                             else NO_RECORD
                         )
 
-                        # Use exact OEM values only when the filename ID
-                        # matches a configured OEM reference.
                         oem = OEM_DATA.get(image_id) if image_id else None
 
                         if oem:
@@ -1389,7 +1431,6 @@ elif page == "Thermal Analysis Studio":
                         })
 
                     except Exception as exc:
-                        # Save a NOT ANALYZED record where possible.
                         save_error = None
 
                         try:
