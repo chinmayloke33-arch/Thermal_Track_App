@@ -1279,18 +1279,18 @@ elif page == "Thermal Analysis Studio":
     render_hero(
         "Thermal Analysis Studio",
         "Upload inspection images. Station and OHE mast details "
-        "will be extracted automatically using OCR."
+        "can be extracted automatically using OCR or entered manually."
     )
 
     st.markdown(
         """
         <div class="info-card">
-            <h4>Automatic location extraction</h4>
+            <h4>Station and OHE mast details</h4>
             <p>
-                No manual station or mast entry is required.
-                If the image contains readable, labelled station and
-                mast information, OCR will attempt to extract it.
-                Otherwise, the saved value will be "No record found".
+                OCR will attempt to read station and mast details from each image.
+                You can also enter or correct these details manually before saving.
+                A manual value takes priority over the OCR result. If neither is
+                available, the saved value will be "No record found".
             </p>
             <p>
                 Colour-based temperature estimates are not equivalent
@@ -1311,6 +1311,44 @@ elif page == "Thermal Analysis Studio":
 
     if uploaded_files:
         st.write(f"Images selected: **{len(uploaded_files)}**")
+
+        # Optional manual metadata for each image. Blank fields retain OCR values.
+        manual_entries = {}
+        section_heading(
+            "Station & OHE Mast Details",
+            "Enter values where OCR may not read the image correctly. "
+            "Leave a field blank to use its OCR result."
+        )
+
+        for file_index, uploaded_file in enumerate(uploaded_files):
+            file_key = hashlib.sha1(
+                uploaded_file.name.encode("utf-8")
+            ).hexdigest()[:12]
+
+            with st.expander(
+                f"Image {file_index + 1}: {clean_filename(uploaded_file.name)}",
+                expanded=(len(uploaded_files) == 1)
+            ):
+                station_col, mast_col = st.columns(2)
+
+                with station_col:
+                    manual_station = st.text_input(
+                        "Station Name (manual)",
+                        key=f"manual_station_{file_key}",
+                        placeholder="Enter station name"
+                    )
+
+                with mast_col:
+                    manual_mast = st.text_input(
+                        "OHE Mast Number (manual)",
+                        key=f"manual_mast_{file_key}",
+                        placeholder="Enter OHE mast number"
+                    )
+
+                manual_entries[uploaded_file.name] = {
+                    "station": manual_station.strip(),
+                    "mast": manual_mast.strip()
+                }
 
         if st.button(
             "Analyse Images & Save Records",
@@ -1373,6 +1411,14 @@ elif page == "Thermal Analysis Studio":
                             else NO_RECORD
                         )
 
+                        # Manual values override OCR; blank manual fields use OCR.
+                        manual_values = manual_entries.get(filename, {})
+                        if manual_values.get("station"):
+                            station_name = manual_values["station"]
+
+                        if manual_values.get("mast"):
+                            mast_number = manual_values["mast"]
+
                         oem = OEM_DATA.get(image_id) if image_id else None
 
                         if oem:
@@ -1431,6 +1477,12 @@ elif page == "Thermal Analysis Studio":
                         })
 
                     except Exception as exc:
+                        manual_values = manual_entries.get(filename, {})
+                        if manual_values.get("station"):
+                            station_name = manual_values["station"]
+                        if manual_values.get("mast"):
+                            mast_number = manual_values["mast"]
+
                         save_error = None
 
                         try:
