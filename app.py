@@ -323,6 +323,18 @@ def initialize_database():
                 """
             )
 
+            for column_name, column_type in [
+                ("division", "TEXT"),
+                ("section_name", "TEXT"),
+                ("gps_latitude", "DOUBLE PRECISION"),
+                ("gps_longitude", "DOUBLE PRECISION"),
+                ("gps_altitude", "DOUBLE PRECISION"),
+                ("gps_record_datetime", "TIMESTAMPTZ"),
+            ]:
+                cur.execute(
+                    f"ALTER TABLE thermal_inspections ADD COLUMN IF NOT EXISTS {column_name} {column_type};"
+                )
+
         conn.commit()
 
     finally:
@@ -362,6 +374,65 @@ def extract_image_timestamp(filename):
 
     except ValueError:
         return None, image_id
+
+
+# ============================================================
+# GPS INFRASTRUCTURE REFERENCE DATA
+# ============================================================
+
+GPS_CSV_PATH = os.path.join("data", "gps_reference.csv")
+
+
+def load_gps_reference():
+    """Load and clean the GPS mast reference CSV."""
+    if not os.path.isfile(GPS_CSV_PATH):
+        return pd.DataFrame()
+
+    try:
+        gps = pd.read_csv(GPS_CSV_PATH, low_memory=False)
+        required = ["Division", "Section", "OHE Mast", "Latitude", "Longitude"]
+        if not all(column in gps.columns for column in required):
+            return pd.DataFrame()
+
+        for column in ["Division", "Section", "OHE Mast"]:
+            gps[column] = gps[column].astype("string").str.strip()
+            gps[column] = gps[column].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+
+        gps = gps.dropna(subset=required)
+        gps["Division"] = gps["Division"].str.upper()
+        gps["Section"] = gps["Section"].str.upper()
+        gps["OHE Mast"] = gps["OHE Mast"].str.upper()
+        gps["Latitude"] = pd.to_numeric(gps["Latitude"], errors="coerce")
+        gps["Longitude"] = pd.to_numeric(gps["Longitude"], errors="coerce")
+        if "Altitude" in gps.columns:
+            gps["Altitude"] = pd.to_numeric(gps["Altitude"], errors="coerce")
+        if "Date & Time" in gps.columns:
+            gps["GPS Record Date" ] = pd.to_datetime(
+                gps["Date & Time"], errors="coerce", dayfirst=True, utc=True
+            )
+        else:
+            gps["GPS Record Date"] = pd.NaT
+
+        gps = gps.dropna(subset=["Latitude", "Longitude"])
+        # Keep one representative coordinate record per Division/Section/Mast.
+        gps = gps.sort_values("GPS Record Date", na_position="last")
+        gps = gps.drop_duplicates(
+            subset=["Division", "Section", "OHE Mast"], keep="last"
+        )
+        return gps.reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+def get_selected_gps_record(gps_df, division, section, mast):
+    if gps_df.empty or not all([division, section, mast]):
+        return None
+    match = gps_df[
+        (gps_df["Division"] == division)
+        & (gps_df["Section"] == section)
+        & (gps_df["OHE Mast"] == mast)
+    ]
+    return None if match.empty else match.iloc[0].to_dict()
 
 
 # ============================================================
@@ -747,7 +818,13 @@ def save_inspection(
     recommendation,
     temperature_source,
     station_name,
-    ohe_mast_number
+    ohe_mast_number,
+    division=None,
+    section_name=None,
+    gps_latitude=None,
+    gps_longitude=None,
+    gps_altitude=None,
+    gps_record_datetime=None
 ):
     conn = get_database_connection()
 
@@ -784,12 +861,19 @@ def save_inspection(
                     image_sha256,
                     image_data,
                     station_name,
-                    ohe_mast_number
+                    ohe_mast_number,
+                    division,
+                    section_name,
+                    gps_latitude,
+                    gps_longitude,
+                    gps_altitude,
+                    gps_record_datetime
                 )
                 VALUES (
                     %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s
                 )
                 RETURNING id;
                 """,
@@ -808,7 +892,13 @@ def save_inspection(
                     image_sha256,
                     psycopg2.Binary(image_bytes),
                     station_name,
-                    ohe_mast_number
+                    ohe_mast_number,
+                    division,
+                    section_name,
+                    gps_latitude,
+                    gps_longitude,
+                    gps_altitude,
+                    gps_record_datetime
                 )
             )
 
@@ -845,6 +935,12 @@ def load_inspections(limit=1000):
                     temperature_source,
                     station_name,
                     ohe_mast_number,
+                    division,
+                    section_name,
+                    gps_latitude,
+                    gps_longitude,
+                    gps_altitude,
+                    gps_record_datetime,
                     image_sha256
                 FROM thermal_inspections
                 ORDER BY uploaded_at DESC
@@ -905,6 +1001,12 @@ def load_all_export_records():
                     temperature_source,
                     station_name,
                     ohe_mast_number,
+                    division,
+                    section_name,
+                    gps_latitude,
+                    gps_longitude,
+                    gps_altitude,
+                    gps_record_datetime,
                     image_sha256,
                     OCTET_LENGTH(image_data) AS image_size_bytes
                 FROM thermal_inspections
@@ -1278,19 +1380,20 @@ elif page == "Thermal Analysis Studio":
 
     render_hero(
         "Thermal Analysis Studio",
-        "Upload inspection images. Station and OHE mast details "
-        "can be extracted automatically using OCR or entered manually."
+        "Upload inspection images and link each one to its GPS-referenced "
+        "Division, Section and OHE Mast."
     )
 
     st.markdown(
         """
         <div class="info-card">
-            <h4>Station and OHE mast details</h4>
+            <h4>GPS-linked OHE mast selection</h4>
             <p>
-                OCR will attempt to read station and mast details from each image.
-                You can also enter or correct these details manually before saving.
-                A manual value takes priority over the OCR result. If neither is
-                available, the saved value will be "No record found".
+                Select Division, Section and OHE Mast for each uploaded image.
+                The matching GPS coordinates are attached to the saved inspection.
+                Station name can still be read by OCR or corrected manually.
+                The GPS timestamp is historical reference data, not the thermal
+                inspection timestamp.
             </p>
             <p>
                 Colour-based temperature estimates are not equivalent
@@ -1312,13 +1415,21 @@ elif page == "Thermal Analysis Studio":
     if uploaded_files:
         st.write(f"Images selected: **{len(uploaded_files)}**")
 
-        # Optional manual metadata for each image. Blank fields retain OCR values.
+        # Load GPS reference and provide cascading selectors for every image.
+        gps_df = load_gps_reference()
         manual_entries = {}
         section_heading(
-            "Station & OHE Mast Details",
-            "Enter values where OCR may not read the image correctly. "
-            "Leave a field blank to use its OCR result."
+            "GPS Location & OHE Mast Selection",
+            "Choose Division → Section → OHE Mast for each image. "
+            "The selected mast coordinates will be saved with its thermal record."
         )
+
+        if gps_df.empty:
+            st.error(
+                "GPS reference data was not loaded. Add the supplied CSV to "
+                "the repository as data/gps_reference.csv. Manual OCR metadata "
+                "will remain available only after the GPS file is added."
+            )
 
         for file_index, uploaded_file in enumerate(uploaded_files):
             file_key = hashlib.sha1(
@@ -1329,25 +1440,73 @@ elif page == "Thermal Analysis Studio":
                 f"Image {file_index + 1}: {clean_filename(uploaded_file.name)}",
                 expanded=(len(uploaded_files) == 1)
             ):
-                station_col, mast_col = st.columns(2)
+                division_options = sorted(gps_df["Division"].dropna().unique().tolist()) if not gps_df.empty else []
+                division = st.selectbox(
+                    "Division", ["Select Division"] + division_options,
+                    key=f"gps_division_{file_key}"
+                )
 
-                with station_col:
-                    manual_station = st.text_input(
-                        "Station Name (manual)",
-                        key=f"manual_station_{file_key}",
-                        placeholder="Enter station name"
+                section_options = []
+                if division != "Select Division":
+                    section_options = sorted(
+                        gps_df.loc[gps_df["Division"] == division, "Section"].dropna().unique().tolist()
                     )
+                section = st.selectbox(
+                    "Section", ["Select Section"] + section_options,
+                    key=f"gps_section_{file_key}",
+                    disabled=(division == "Select Division" or not section_options)
+                )
 
-                with mast_col:
-                    manual_mast = st.text_input(
-                        "OHE Mast Number (manual)",
-                        key=f"manual_mast_{file_key}",
-                        placeholder="Enter OHE mast number"
+                mast_options = []
+                if division != "Select Division" and section != "Select Section":
+                    mast_options = sorted(
+                        gps_df.loc[
+                            (gps_df["Division"] == division)
+                            & (gps_df["Section"] == section),
+                            "OHE Mast"
+                        ].dropna().unique().tolist()
                     )
+                mast = st.selectbox(
+                    "OHE Mast Number", ["Select OHE Mast"] + mast_options,
+                    key=f"gps_mast_{file_key}",
+                    disabled=(section == "Select Section" or not mast_options)
+                )
+
+                selected_gps = get_selected_gps_record(
+                    gps_df,
+                    division if division != "Select Division" else None,
+                    section if section != "Select Section" else None,
+                    mast if mast != "Select OHE Mast" else None
+                )
+
+                if selected_gps:
+                    gps_col1, gps_col2, gps_col3 = st.columns(3)
+                    gps_col1.metric("Latitude", f"{selected_gps['Latitude']:.6f}")
+                    gps_col2.metric("Longitude", f"{selected_gps['Longitude']:.6f}")
+                    altitude = selected_gps.get("Altitude")
+                    gps_col3.metric("Altitude", f"{altitude:.1f} m" if pd.notna(altitude) else "N/A")
+                    gps_date = selected_gps.get("GPS Record Date")
+                    if pd.notna(gps_date):
+                        st.caption(
+                            "Reference GPS timestamp: "
+                            + gps_date.strftime("%d %b %Y, %H:%M UTC")
+                            + " (historical reference; not the thermal inspection time)"
+                        )
+                else:
+                    st.caption("Select all three fields to retrieve the mast coordinates.")
+
+                manual_station = st.text_input(
+                    "Station Name (optional OCR correction)",
+                    key=f"manual_station_{file_key}",
+                    placeholder="Leave blank to use OCR"
+                )
 
                 manual_entries[uploaded_file.name] = {
                     "station": manual_station.strip(),
-                    "mast": manual_mast.strip()
+                    "division": division if division != "Select Division" else None,
+                    "section": section if section != "Select Section" else None,
+                    "mast": mast if mast != "Select OHE Mast" else None,
+                    "gps": selected_gps
                 }
 
         if st.button(
@@ -1361,6 +1520,12 @@ elif page == "Thermal Analysis Studio":
                 st.error(
                     "Database unavailable. Check DATABASE_URL "
                     "in Streamlit Secrets."
+                )
+
+            elif any(not entry.get("gps") for entry in manual_entries.values()):
+                st.error(
+                    "Please select a valid Division, Section and OHE Mast "
+                    "for every uploaded image before analysis."
                 )
 
             else:
@@ -1419,6 +1584,10 @@ elif page == "Thermal Analysis Studio":
                         if manual_values.get("mast"):
                             mast_number = manual_values["mast"]
 
+                        gps_record = manual_values.get("gps")
+                        if gps_record:
+                            mast_number = manual_values["mast"]
+
                         oem = OEM_DATA.get(image_id) if image_id else None
 
                         if oem:
@@ -1459,7 +1628,13 @@ elif page == "Thermal Analysis Studio":
                             recommendation=recommendation,
                             temperature_source=temperature_source,
                             station_name=station_name,
-                            ohe_mast_number=mast_number
+                            ohe_mast_number=mast_number,
+                            division=manual_values.get("division"),
+                            section_name=manual_values.get("section"),
+                            gps_latitude=(gps_record.get("Latitude") if gps_record else None),
+                            gps_longitude=(gps_record.get("Longitude") if gps_record else None),
+                            gps_altitude=(gps_record.get("Altitude") if gps_record and pd.notna(gps_record.get("Altitude")) else None),
+                            gps_record_datetime=(gps_record.get("GPS Record Date") if gps_record and pd.notna(gps_record.get("GPS Record Date")) else None)
                         )
 
                         batch_results.append({
@@ -1467,7 +1642,11 @@ elif page == "Thermal Analysis Studio":
                             "Filename": filename,
                             "Image ID": image_id,
                             "Station": station_name,
+                            "Division": manual_values.get("division"),
+                            "Section": manual_values.get("section"),
                             "OHE Mast": mast_number,
+                            "Latitude": gps_record.get("Latitude") if gps_record else None,
+                            "Longitude": gps_record.get("Longitude") if gps_record else None,
                             "Minimum °C": minimum_temperature,
                             "Maximum °C": maximum_temperature,
                             "Difference °C": difference,
@@ -1498,7 +1677,13 @@ elif page == "Thermal Analysis Studio":
                                 recommendation=str(exc)[:1000],
                                 temperature_source="Error",
                                 station_name=station_name,
-                                ohe_mast_number=mast_number
+                                ohe_mast_number=mast_number,
+                                division=manual_values.get("division"),
+                                section_name=manual_values.get("section"),
+                                gps_latitude=(manual_values.get("gps", {}).get("Latitude") if manual_values.get("gps") else None),
+                                gps_longitude=(manual_values.get("gps", {}).get("Longitude") if manual_values.get("gps") else None),
+                                gps_altitude=(manual_values.get("gps", {}).get("Altitude") if manual_values.get("gps") and pd.notna(manual_values.get("gps", {}).get("Altitude")) else None),
+                                gps_record_datetime=(manual_values.get("gps", {}).get("GPS Record Date") if manual_values.get("gps") and pd.notna(manual_values.get("gps", {}).get("GPS Record Date")) else None)
                             )
 
                         except Exception as save_exc:
