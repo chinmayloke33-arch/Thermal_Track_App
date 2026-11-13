@@ -32,7 +32,7 @@ NO_RECORD = "No record found"
 
 
 # ============================================================
-# OEM REFERENCE DATA (Aligned with O&M Software Reference)
+# OEM REFERENCE DATA (Aligned with O&M Software: Max first, Min second)
 # ============================================================
 
 OEM_DATA = {
@@ -176,6 +176,39 @@ st.markdown(
         font-size: 13px;
     }
 
+    .status-badge-fault {
+        display: inline-block;
+        background: rgba(239, 68, 68, 0.18);
+        color: #f87171;
+        border: 1px solid #ef4444;
+        border-radius: 8px;
+        padding: 4px 12px;
+        font-weight: 800;
+        font-size: 13px;
+    }
+
+    .status-badge-ok {
+        display: inline-block;
+        background: rgba(16, 185, 129, 0.18);
+        color: #34d399;
+        border: 1px solid #10b981;
+        border-radius: 8px;
+        padding: 4px 12px;
+        font-weight: 800;
+        font-size: 13px;
+    }
+
+    .status-badge-pending {
+        display: inline-block;
+        background: rgba(245, 158, 11, 0.18);
+        color: #fbbf24;
+        border: 1px solid #f59e0b;
+        border-radius: 8px;
+        padding: 4px 12px;
+        font-weight: 800;
+        font-size: 13px;
+    }
+
     .stButton > button {
         border-radius: 10px;
         min-height: 42px;
@@ -294,8 +327,8 @@ def initialize_database():
                     image_id TEXT,
                     image_datetime TIMESTAMPTZ,
                     uploaded_at TIMESTAMPTZ NOT NULL,
-                    minimum_temperature DOUBLE PRECISION,
                     maximum_temperature DOUBLE PRECISION,
+                    minimum_temperature DOUBLE PRECISION,
                     temperature_difference DOUBLE PRECISION,
                     mean_temperature DOUBLE PRECISION,
                     fault_status TEXT NOT NULL,
@@ -350,7 +383,6 @@ def extract_image_timestamp(filename):
 
     date_part = match.group(1)
     time_part = match.group(2)
-    # Full timestamp ID (e.g., "20250315-133514-016") to match OEM_DATA keys
     image_id = match.group(0)
 
     try:
@@ -376,13 +408,6 @@ def normalize_ocr_text(text):
 
 
 def extract_station_and_mast_from_image(image):
-    """
-    Extract station name and OHE mast number from image text.
-
-    No manual inputs are used. Missing values are returned as None
-    and converted to 'No record found' when saved.
-    """
-
     text_candidates = []
 
     try:
@@ -531,18 +556,14 @@ def extract_station_and_mast_from_image(image):
 
 
 def extract_scale_temperatures_ocr(image):
-    """
-    Attempt to read printed Max/Min temperatures directly from the
-    thermal camera scale bar (right margin) and top/bottom overlays.
-    """
     try:
         rgb = np.array(image.convert("RGB"))
         h, w = rgb.shape[:2]
 
         crops = [
-            rgb[:, int(w * 0.84):],              # Right scale bar
-            rgb[:int(h * 0.14), :int(w * 0.55)], # Top-left overlay
-            rgb[int(h * 0.86):, :int(w * 0.55)]  # Bottom-left overlay
+            rgb[:, int(w * 0.84):],
+            rgb[:int(h * 0.14), :int(w * 0.55)],
+            rgb[int(h * 0.86):, :int(w * 0.55)]
         ]
 
         extracted_temps = []
@@ -621,7 +642,6 @@ def extract_features(image):
     h, s, v = cv2.split(hsv)
     l, a, b = cv2.split(lab)
 
-    # Preserve white-hot (s ~ 0, v ~ 255) and black-cold (v ~ 0) pixels
     features = [
         np.mean(h),
         np.std(h),
@@ -668,7 +688,10 @@ def train_calibration_model():
             continue
 
         _, stem_id = extract_image_timestamp(filename)
-        lookup_key = stem_id if stem_id in OEM_DATA else os.path.splitext(filename)[0]
+        lookup_key = (
+            stem_id if stem_id in OEM_DATA
+            else os.path.splitext(filename)[0]
+        )
 
         if lookup_key not in OEM_DATA:
             continue
@@ -722,7 +745,6 @@ def train_calibration_model():
 
 
 def predict_temperature(image, features, model):
-    # Step 1: Try reading printed scale bar / overlay temperatures via OCR
     ocr_min, ocr_max = extract_scale_temperatures_ocr(image)
     if ocr_min is not None and ocr_max is not None:
         return (
@@ -731,7 +753,6 @@ def predict_temperature(image, features, model):
             "OCR scale extraction"
         )
 
-    # Step 2: Use trained calibration model if calibration_images/ is present
     if model is not None:
         scaled = (
             features - model["mean"]
@@ -756,7 +777,6 @@ def predict_temperature(image, features, model):
             "Calibration model estimate"
         )
 
-    # Step 3: Fallback using 1st and 99th brightness percentiles
     v_low = features[12]
     v_high = features[16]
 
@@ -801,7 +821,7 @@ def get_decision(delta):
 
 
 # ============================================================
-# DATABASE SAVE / READ
+# DATABASE SAVE / READ (Ordered: Maximum first, Minimum second)
 # ============================================================
 
 def save_inspection(
@@ -809,8 +829,8 @@ def save_inspection(
     image_id,
     image_datetime,
     image_bytes,
-    minimum_temperature,
     maximum_temperature,
+    minimum_temperature,
     mean_temperature,
     fault_status,
     recommendation,
@@ -843,8 +863,8 @@ def save_inspection(
                     image_id,
                     image_datetime,
                     uploaded_at,
-                    minimum_temperature,
                     maximum_temperature,
+                    minimum_temperature,
                     temperature_difference,
                     mean_temperature,
                     fault_status,
@@ -867,8 +887,8 @@ def save_inspection(
                     image_id,
                     image_datetime,
                     uploaded_at,
-                    minimum_temperature,
                     maximum_temperature,
+                    minimum_temperature,
                     temperature_difference,
                     mean_temperature,
                     fault_status,
@@ -905,8 +925,8 @@ def load_inspections(limit=1000):
                     image_id,
                     image_datetime,
                     uploaded_at,
-                    minimum_temperature,
                     maximum_temperature,
+                    minimum_temperature,
                     temperature_difference,
                     mean_temperature,
                     fault_status,
@@ -965,8 +985,8 @@ def load_all_export_records():
                     image_id,
                     image_datetime,
                     uploaded_at,
-                    minimum_temperature,
                     maximum_temperature,
+                    minimum_temperature,
                     temperature_difference,
                     mean_temperature,
                     fault_status,
@@ -996,6 +1016,9 @@ def load_all_export_records():
 def dataframe_to_excel(dataframe, sheet_name="Inspections"):
     output = io.BytesIO()
     export_df = dataframe.copy()
+
+    if "_image_bytes" in export_df.columns:
+        export_df = export_df.drop(columns=["_image_bytes"])
 
     for column in export_df.columns:
         if isinstance(
@@ -1307,13 +1330,14 @@ if page == "Dashboard":
     section_heading("Latest Inspections")
 
     if not recent.empty:
+        # Maximum temperature placed before Minimum temperature
         display_columns = [
             "id",
             "image_filename",
             "station_name",
             "ohe_mast_number",
-            "minimum_temperature",
             "maximum_temperature",
+            "minimum_temperature",
             "temperature_difference",
             "fault_status",
             "uploaded_at"
@@ -1379,36 +1403,43 @@ elif page == "Thermal Analysis Studio":
         manual_entries = {}
         section_heading(
             "Station & OHE Mast Details",
-            "Enter values where OCR may not read the image correctly. "
-            "Leave a field blank to use its OCR result."
+            "Preview uploaded images and enter values where OCR may not "
+            "read the image correctly. Leave a field blank to use its OCR result."
         )
 
         for file_index, uploaded_file in enumerate(uploaded_files):
             file_key = hashlib.sha1(
                 uploaded_file.name.encode("utf-8")
             ).hexdigest()[:12]
+            fname = clean_filename(uploaded_file.name)
 
             with st.expander(
-                f"Image {file_index + 1}: {clean_filename(uploaded_file.name)}",
-                expanded=(len(uploaded_files) == 1)
+                f"Image {file_index + 1}: {fname}",
+                expanded=(len(uploaded_files) <= 3)
             ):
-                station_col, mast_col = st.columns(2)
+                preview_col, form_col = st.columns([0.35, 0.65])
 
-                with station_col:
+                with preview_col:
+                    st.image(
+                        uploaded_file.getvalue(),
+                        caption=fname,
+                        use_container_width=True
+                    )
+
+                with form_col:
                     manual_station = st.text_input(
                         "Station Name (manual)",
                         key=f"manual_station_{file_key}",
                         placeholder="Enter station name"
                     )
 
-                with mast_col:
                     manual_mast = st.text_input(
                         "OHE Mast Number (manual)",
                         key=f"manual_mast_{file_key}",
                         placeholder="Enter OHE mast number"
                     )
 
-                manual_entries[ clean_filename(uploaded_file.name) ] = {
+                manual_entries[fname] = {
                     "station": manual_station.strip(),
                     "mast": manual_mast.strip()
                 }
@@ -1481,7 +1512,6 @@ elif page == "Thermal Analysis Studio":
                         if manual_values.get("mast"):
                             mast_number = manual_values["mast"]
 
-                        # Match against full OEM_DATA key or filename stem
                         stem_key = os.path.splitext(filename)[0]
                         oem = (
                             OEM_DATA.get(image_id)
@@ -1489,8 +1519,8 @@ elif page == "Thermal Analysis Studio":
                         )
 
                         if oem:
-                            minimum_temperature = float(oem["min"])
                             maximum_temperature = float(oem["max"])
+                            minimum_temperature = float(oem["min"])
                             temperature_source = "OEM reference data"
 
                         else:
@@ -1519,8 +1549,8 @@ elif page == "Thermal Analysis Studio":
                             image_id=image_id,
                             image_datetime=image_datetime,
                             image_bytes=image_bytes,
-                            minimum_temperature=minimum_temperature,
                             maximum_temperature=maximum_temperature,
+                            minimum_temperature=minimum_temperature,
                             mean_temperature=mean_temperature,
                             fault_status=fault_status,
                             recommendation=recommendation,
@@ -1529,18 +1559,20 @@ elif page == "Thermal Analysis Studio":
                             ohe_mast_number=mast_number
                         )
 
+                        # Maximum °C placed before Minimum °C
                         batch_results.append({
                             "Record ID": record_id,
                             "Filename": filename,
                             "Image ID": image_id,
                             "Station": station_name,
                             "OHE Mast": mast_number,
-                            "Minimum °C": minimum_temperature,
                             "Maximum °C": maximum_temperature,
+                            "Minimum °C": minimum_temperature,
                             "Difference °C": difference,
                             "Status": fault_status,
                             "Temperature Source": temperature_source,
-                            "Recommendation": recommendation
+                            "Recommendation": recommendation,
+                            "_image_bytes": image_bytes
                         })
 
                     except Exception as exc:
@@ -1558,8 +1590,8 @@ elif page == "Thermal Analysis Studio":
                                 image_id=image_id,
                                 image_datetime=image_datetime,
                                 image_bytes=image_bytes,
-                                minimum_temperature=None,
                                 maximum_temperature=None,
+                                minimum_temperature=None,
                                 mean_temperature=None,
                                 fault_status="NOT ANALYZED",
                                 recommendation=str(exc)[:1000],
@@ -1578,12 +1610,13 @@ elif page == "Thermal Analysis Studio":
                             "Image ID": image_id,
                             "Station": station_name,
                             "OHE Mast": mast_number,
-                            "Minimum °C": None,
                             "Maximum °C": None,
+                            "Minimum °C": None,
                             "Difference °C": None,
                             "Status": "NOT ANALYZED",
                             "Temperature Source": "Error",
-                            "Recommendation": str(exc)[:500]
+                            "Recommendation": str(exc)[:500],
+                            "_image_bytes": image_bytes
                         }
 
                         if save_error:
@@ -1598,26 +1631,93 @@ elif page == "Thermal Analysis Studio":
                 st.session_state["batch_results"] = batch_results
 
                 st.success(
-                    "Batch processing completed. Check the results below "
-                    "and open Inspection History to review saved records."
+                    "Batch processing completed. Check the visual inspection "
+                    "cards and table below."
                 )
 
     if "batch_results" in st.session_state:
-        section_heading("Batch Results")
+        section_heading(
+            "Analyzed Images & Results",
+            "Visual review of each uploaded thermal image alongside its extracted parameters."
+        )
+
+        for item in st.session_state["batch_results"]:
+            with st.container():
+                st.markdown('<div class="info-card">', unsafe_allow_html=True)
+                img_col, details_col = st.columns([0.38, 0.62])
+
+                with img_col:
+                    if item.get("_image_bytes"):
+                        st.image(
+                            item["_image_bytes"],
+                            caption=f"Record #{item.get('Record ID')} — {item.get('Filename')}",
+                            use_container_width=True
+                        )
+
+                with details_col:
+                    status_val = item.get("Status", "NOT ANALYZED")
+                    if status_val == "FAULT":
+                        badge_html = '<span class="status-badge-fault">⚠️ FAULT DETECTED</span>'
+                    elif status_val == "NO FAULT":
+                        badge_html = '<span class="status-badge-ok">✅ NO FAULT</span>'
+                    else:
+                        badge_html = '<span class="status-badge-pending">⏳ NOT ANALYZED</span>'
+
+                    st.markdown(
+                        f"#### {item.get('Filename')} &nbsp; {badge_html}",
+                        unsafe_allow_html=True
+                    )
+
+                    # Ordered: Maximum °C first, Minimum °C second, Difference °C third
+                    m1, m2, m3 = st.columns(3)
+                    max_val = item.get("Maximum °C")
+                    min_val = item.get("Minimum °C")
+                    diff_val = item.get("Difference °C")
+
+                    m1.metric(
+                        "Maximum °C",
+                        f"{max_val:.2f} °C" if max_val is not None else "N/A"
+                    )
+                    m2.metric(
+                        "Minimum °C",
+                        f"{min_val:.2f} °C" if min_val is not None else "N/A"
+                    )
+                    m3.metric(
+                        "Difference °C",
+                        f"{diff_val:.2f} °C" if diff_val is not None else "N/A"
+                    )
+
+                    st.markdown(
+                        f"**Record ID:** `{item.get('Record ID')}` &nbsp;|&nbsp; "
+                        f"**Image ID:** `{item.get('Image ID')}`  \n"
+                        f"**Station:** {item.get('Station')} &nbsp;|&nbsp; "
+                        f"**OHE Mast:** {item.get('OHE Mast')}  \n"
+                        f"**Source:** {item.get('Temperature Source')}  \n"
+                        f"**Recommendation:** {item.get('Recommendation')}"
+                    )
+
+                st.markdown('</div>', unsafe_allow_html=True)
+
+        section_heading("Batch Results Table")
 
         results_df = pd.DataFrame(
             st.session_state["batch_results"]
         )
 
+        display_df = results_df.drop(
+            columns=["_image_bytes"],
+            errors="ignore"
+        )
+
         st.dataframe(
-            results_df,
+            display_df,
             use_container_width=True,
             hide_index=True
         )
 
         st.download_button(
             "Download Batch Results (Excel)",
-            data=dataframe_to_excel(results_df, "Batch Results"),
+            data=dataframe_to_excel(display_df, "Batch Results"),
             file_name="KRCL_Thermal_Batch_Results.xlsx",
             mime=(
                 "application/vnd.openxmlformats-officedocument."
@@ -2082,11 +2182,12 @@ elif page == "OEM Validation":
         "Review the reference dataset configured in the application."
     )
 
+    # Ordered: OEM Maximum °C first, OEM Minimum °C second
     oem_df = pd.DataFrame([
         {
             "Image ID": image_id,
-            "OEM Minimum °C": values["min"],
             "OEM Maximum °C": values["max"],
+            "OEM Minimum °C": values["min"],
             "OEM Difference °C": round(values["max"] - values["min"], 2)
         }
         for image_id, values in OEM_DATA.items()
@@ -2103,16 +2204,16 @@ elif page == "OEM Validation":
 
     with c2:
         render_metric(
-            "MINIMUM REFERENCE",
-            f"{oem_df['OEM Minimum °C'].min():.1f} °C",
-            "Lowest configured OEM minimum"
+            "MAXIMUM REFERENCE",
+            f"{oem_df['OEM Maximum °C'].max():.1f} °C",
+            "Highest configured OEM maximum"
         )
 
     with c3:
         render_metric(
-            "MAXIMUM REFERENCE",
-            f"{oem_df['OEM Maximum °C'].max():.1f} °C",
-            "Highest configured OEM maximum"
+            "MINIMUM REFERENCE",
+            f"{oem_df['OEM Minimum °C'].min():.1f} °C",
+            "Lowest configured OEM minimum"
         )
 
     section_heading("OEM Reference Dataset")
