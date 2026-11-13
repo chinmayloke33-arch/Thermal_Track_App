@@ -5,6 +5,7 @@ import cv2
 import pandas as pd
 import io
 import os
+import glob
 import re
 import hashlib
 import psycopg2
@@ -52,7 +53,96 @@ OEM_DATA = {
 
 
 # ============================================================
-# PREMIUM DARK UI — LIGHT UPLOAD BOX
+# LOAD OHE GPS CSV FROM GITHUB 'data/' OR ROOT FOLDER
+# ============================================================
+
+@st.cache_data
+def load_ohe_master_data():
+    """
+    Loads Station/Section and OHE Mast mappings from the GPS CSV
+    located in the GitHub `data/` folder or root folder.
+    """
+    candidate_paths = [
+        "data/gps_reference.csv",
+        "gps_reference.csv",
+        "data/Oliver G13052026GPS(1) (1).csv",
+        "data/Oliver G13052026GPS(1).csv",
+        "data/Oliver G13052026GPS.csv",
+        "Oliver G13052026GPS(1) (1).csv",
+        "Oliver G13052026GPS(1).csv",
+        "Oliver G13052026GPS.csv",
+    ]
+
+    # Also scan data/*.csv and ./*.csv automatically
+    for folder in ("data", "."):
+        if os.path.isdir(folder):
+            for csv_file in sorted(glob.glob(os.path.join(folder, "*.csv"))):
+                if csv_file not in candidate_paths:
+                    candidate_paths.append(csv_file)
+
+    csv_path = None
+    for path in candidate_paths:
+        if os.path.isfile(path):
+            csv_path = path
+            break
+
+    section_to_masts = {}
+    all_sections = []
+    all_masts = []
+
+    if csv_path:
+        try:
+            df = pd.read_csv(csv_path, low_memory=False)
+            df.columns = [c.strip() for c in df.columns]
+
+            if "Section" in df.columns and "OHE Mast" in df.columns:
+                sec_series = (
+                    df["Section"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                    .str.replace(r"\s+", " ", regex=True)
+                )
+                mast_series = (
+                    df["OHE Mast"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                )
+
+                valid_df = pd.DataFrame({
+                    "Section": sec_series,
+                    "OHE_Mast": mast_series
+                })
+                valid_df = valid_df[valid_df["OHE_Mast"] != ""]
+
+                all_sections = sorted(
+                    [s for s in valid_df["Section"].unique().tolist() if s]
+                )
+
+                # Preserve natural appearance order for masts while removing duplicates
+                all_masts = list(dict.fromkeys(valid_df["OHE_Mast"].tolist()))
+
+                for sec, group in valid_df.groupby("Section"):
+                    if sec:
+                        section_to_masts[sec] = list(
+                            dict.fromkeys(group["OHE_Mast"].tolist())
+                        )
+
+        except Exception:
+            pass
+
+    return {
+        "csv_path": csv_path,
+        "sections": all_sections,
+        "all_masts": all_masts,
+        "section_to_masts": section_to_masts
+    }
+
+
+# ============================================================
+# PREMIUM DARK UI — LIGHT UPLOAD BOX & READABLE DROPDOWNS
 # ============================================================
 
 st.markdown(
@@ -207,6 +297,19 @@ st.markdown(
         padding: 4px 12px;
         font-weight: 800;
         font-size: 13px;
+    }
+
+    /* Selectbox / Dropdown visibility in Dark UI */
+    div[data-baseweb="select"] > div {
+        background-color: #142238 !important;
+        color: #ffffff !important;
+        border: 1px solid #2e8c9d !important;
+        border-radius: 10px !important;
+    }
+
+    div[data-baseweb="select"] span,
+    div[data-baseweb="select"] input {
+        color: #ffffff !important;
     }
 
     .stButton > button {
@@ -1194,7 +1297,7 @@ st.sidebar.markdown(
 
 
 # ============================================================
-# DATABASE STATUS
+# DATABASE & OHE CSV STATUS
 # ============================================================
 
 db_ready = False
@@ -1206,6 +1309,8 @@ try:
 
 except Exception as exc:
     db_error = str(exc)
+
+ohe_master = load_ohe_master_data()
 
 
 # ============================================================
@@ -1330,7 +1435,6 @@ if page == "Dashboard":
     section_heading("Latest Inspections")
 
     if not recent.empty:
-        # Maximum temperature placed before Minimum temperature
         display_columns = [
             "id",
             "image_filename",
@@ -1366,24 +1470,19 @@ elif page == "Thermal Analysis Studio":
 
     render_hero(
         "Thermal Analysis Studio",
-        "Upload inspection images. Station and OHE mast details "
-        "can be extracted automatically using OCR or entered manually."
+        "Upload inspection images. Select Station/Section and OHE Mast "
+        "from the GPS master dataset dropdowns or use automatic OCR."
     )
 
     st.markdown(
         """
         <div class="info-card">
-            <h4>Station and OHE mast details</h4>
+            <h4>Station / Section and OHE Mast Dropdowns</h4>
             <p>
-                OCR will attempt to read station and mast details from each image.
-                You can also enter or correct these details manually before saving.
-                A manual value takes priority over the OCR result. If neither is
-                available, the saved value will be "No record found".
-            </p>
-            <p>
-                Colour-based temperature estimates are not equivalent
-                to radiometric thermal measurements. Validate results
-                against approved equipment and engineering procedures.
+                Select the Station / Section and OHE Mast Number directly from the
+                KRCL OHE GPS dataset dropdowns, or leave on <b>Auto-detect via OCR</b>.
+                When you choose a Section, the OHE Mast dropdown automatically filters
+                to the masts recorded in that section.
             </p>
         </div>
         """,
@@ -1400,11 +1499,21 @@ elif page == "Thermal Analysis Studio":
     if uploaded_files:
         st.write(f"Images selected: **{len(uploaded_files)}**")
 
+        csv_sections = ohe_master["sections"]
+        csv_all_masts = ohe_master["all_masts"]
+        sec_to_masts = ohe_master["section_to_masts"]
+
+        station_dropdown_options = (
+            ["Auto-detect via OCR"]
+            + csv_sections
+            + ["Other (Enter manually)"]
+        )
+
         manual_entries = {}
         section_heading(
-            "Station & OHE Mast Details",
-            "Preview uploaded images and enter values where OCR may not "
-            "read the image correctly. Leave a field blank to use its OCR result."
+            "Station / Section & OHE Mast Selection",
+            "Choose Station/Section and OHE Mast from the GPS master dropdowns, "
+            "or leave on Auto-detect via OCR."
         )
 
         for file_index, uploaded_file in enumerate(uploaded_files):
@@ -1415,7 +1524,7 @@ elif page == "Thermal Analysis Studio":
 
             with st.expander(
                 f"Image {file_index + 1}: {fname}",
-                expanded=(len(uploaded_files) <= 3)
+                expanded=True
             ):
                 preview_col, form_col = st.columns([0.35, 0.65])
 
@@ -1427,17 +1536,53 @@ elif page == "Thermal Analysis Studio":
                     )
 
                 with form_col:
-                    manual_station = st.text_input(
-                        "Station Name (manual)",
-                        key=f"manual_station_{file_key}",
-                        placeholder="Enter station name"
+                    selected_station = st.selectbox(
+                        "Station / Section Name",
+                        options=station_dropdown_options,
+                        index=0,
+                        key=f"station_select_{file_key}"
                     )
 
-                    manual_mast = st.text_input(
-                        "OHE Mast Number (manual)",
-                        key=f"manual_mast_{file_key}",
-                        placeholder="Enter OHE mast number"
+                    if selected_station == "Other (Enter manually)":
+                        manual_station = st.text_input(
+                            "Enter Custom Station / Section Name",
+                            key=f"manual_station_{file_key}",
+                            placeholder="Type station or section name"
+                        )
+                        filtered_masts = csv_all_masts
+                    elif selected_station == "Auto-detect via OCR":
+                        manual_station = ""
+                        filtered_masts = csv_all_masts
+                    else:
+                        manual_station = selected_station
+                        filtered_masts = sec_to_masts.get(
+                            selected_station,
+                            csv_all_masts
+                        )
+
+                    mast_dropdown_options = (
+                        ["Auto-detect via OCR"]
+                        + filtered_masts
+                        + ["Other (Enter manually)"]
                     )
+
+                    selected_mast = st.selectbox(
+                        f"OHE Mast Number ({len(filtered_masts):,} available)",
+                        options=mast_dropdown_options,
+                        index=0,
+                        key=f"mast_select_{file_key}"
+                    )
+
+                    if selected_mast == "Other (Enter manually)":
+                        manual_mast = st.text_input(
+                            "Enter Custom OHE Mast Number",
+                            key=f"manual_mast_{file_key}",
+                            placeholder="e.g., 30/02 or 29/36"
+                        )
+                    elif selected_mast == "Auto-detect via OCR":
+                        manual_mast = ""
+                    else:
+                        manual_mast = selected_mast
 
                 manual_entries[fname] = {
                     "station": manual_station.strip(),
@@ -1559,7 +1704,6 @@ elif page == "Thermal Analysis Studio":
                             ohe_mast_number=mast_number
                         )
 
-                        # Maximum °C placed before Minimum °C
                         batch_results.append({
                             "Record ID": record_id,
                             "Filename": filename,
@@ -1668,7 +1812,6 @@ elif page == "Thermal Analysis Studio":
                         unsafe_allow_html=True
                     )
 
-                    # Ordered: Maximum °C first, Minimum °C second, Difference °C third
                     m1, m2, m3 = st.columns(3)
                     max_val = item.get("Maximum °C")
                     min_val = item.get("Minimum °C")
@@ -1690,7 +1833,7 @@ elif page == "Thermal Analysis Studio":
                     st.markdown(
                         f"**Record ID:** `{item.get('Record ID')}` &nbsp;|&nbsp; "
                         f"**Image ID:** `{item.get('Image ID')}`  \n"
-                        f"**Station:** {item.get('Station')} &nbsp;|&nbsp; "
+                        f"**Station / Section:** {item.get('Station')} &nbsp;|&nbsp; "
                         f"**OHE Mast:** {item.get('OHE Mast')}  \n"
                         f"**Source:** {item.get('Temperature Source')}  \n"
                         f"**Recommendation:** {item.get('Recommendation')}"
@@ -2182,7 +2325,6 @@ elif page == "OEM Validation":
         "Review the reference dataset configured in the application."
     )
 
-    # Ordered: OEM Maximum °C first, OEM Minimum °C second
     oem_df = pd.DataFrame([
         {
             "Image ID": image_id,
@@ -2286,7 +2428,7 @@ elif page == "System Status":
 
     render_hero(
         "System Status",
-        "Review the application environment and database connection."
+        "Review the application environment, GPS master dataset and database connection."
     )
 
     try:
@@ -2318,6 +2460,17 @@ elif page == "System Status":
             "Component": "Tesseract OCR",
             "Status": ocr_status,
             "Details": tesseract_version
+        },
+        {
+            "Component": "OHE GPS Master CSV",
+            "Status": "Loaded" if ohe_master["csv_path"] else "Not Found",
+            "Details": (
+                f"{ohe_master['csv_path']} "
+                f"({len(ohe_master['sections'])} sections, "
+                f"{len(ohe_master['all_masts']):,} masts)"
+                if ohe_master["csv_path"]
+                else "Place gps_reference.csv in data/ folder"
+            )
         },
         {
             "Component": "Database",
@@ -2370,6 +2523,10 @@ elif page == "System Status":
         {
             "Setting": "OEM reference entries",
             "Value": str(len(OEM_DATA))
+        },
+        {
+            "Setting": "OHE GPS Master File",
+            "Value": ohe_master["csv_path"] or "Not found"
         },
         {
             "Setting": "Calibration directory",
