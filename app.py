@@ -32,12 +32,12 @@ NO_RECORD = "No record found"
 
 
 # ============================================================
-# OEM REFERENCE DATA
+# OEM REFERENCE DATA (Aligned with O&M Software Reference)
 # ============================================================
 
 OEM_DATA = {
-    "20250315-133514-016": {"max": 39.5, "min": 37.6},
-    "20251111-112915-003": {"max": 31.5, "min": 21.9},
+    "20250315-133514-016": {"max": 39.5, "min": 36.1},
+    "20251111-112915-003": {"max": 31.5, "min": 22.0},
     "20251111-114541-001": {"max": 35.6, "min": 7.2},
     "20251111-114605-002": {"max": 35.4, "min": 27.4},
     "20251113-074547-002": {"max": 17.6, "min": 13.7},
@@ -45,7 +45,7 @@ OEM_DATA = {
     "20251113-092707-005": {"max": 24.4, "min": 20.5},
     "20251113-093327-012": {"max": 24.0, "min": 18.3},
     "20251113-113151-016": {"max": 34.5, "min": 24.7},
-    "20251114-101128-007": {"max": 26.2, "min": 15.8},
+    "20251114-101128-007": {"max": 26.2, "min": 15.5},
     "20251114-114841-018": {"max": 35.0, "min": 13.6},
     "20251117-124611-004": {"max": 33.8, "min": 22.8},
 }
@@ -323,18 +323,6 @@ def initialize_database():
                 """
             )
 
-            for column_name, column_type in [
-                ("division", "TEXT"),
-                ("section_name", "TEXT"),
-                ("gps_latitude", "DOUBLE PRECISION"),
-                ("gps_longitude", "DOUBLE PRECISION"),
-                ("gps_altitude", "DOUBLE PRECISION"),
-                ("gps_record_datetime", "TIMESTAMPTZ"),
-            ]:
-                cur.execute(
-                    f"ALTER TABLE thermal_inspections ADD COLUMN IF NOT EXISTS {column_name} {column_type};"
-                )
-
         conn.commit()
 
     finally:
@@ -362,7 +350,8 @@ def extract_image_timestamp(filename):
 
     date_part = match.group(1)
     time_part = match.group(2)
-    image_id = match.group(3)
+    # Full timestamp ID (e.g., "20250315-133514-016") to match OEM_DATA keys
+    image_id = match.group(0)
 
     try:
         parsed = datetime.strptime(
@@ -377,66 +366,7 @@ def extract_image_timestamp(filename):
 
 
 # ============================================================
-# GPS INFRASTRUCTURE REFERENCE DATA
-# ============================================================
-
-GPS_CSV_PATH = os.path.join("data", "gps_reference.csv")
-
-
-def load_gps_reference():
-    """Load and clean the GPS mast reference CSV."""
-    if not os.path.isfile(GPS_CSV_PATH):
-        return pd.DataFrame()
-
-    try:
-        gps = pd.read_csv(GPS_CSV_PATH, low_memory=False)
-        required = ["Division", "Section", "OHE Mast", "Latitude", "Longitude"]
-        if not all(column in gps.columns for column in required):
-            return pd.DataFrame()
-
-        for column in ["Division", "Section", "OHE Mast"]:
-            gps[column] = gps[column].astype("string").str.strip()
-            gps[column] = gps[column].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
-
-        gps = gps.dropna(subset=required)
-        gps["Division"] = gps["Division"].str.upper()
-        gps["Section"] = gps["Section"].str.upper()
-        gps["OHE Mast"] = gps["OHE Mast"].str.upper()
-        gps["Latitude"] = pd.to_numeric(gps["Latitude"], errors="coerce")
-        gps["Longitude"] = pd.to_numeric(gps["Longitude"], errors="coerce")
-        if "Altitude" in gps.columns:
-            gps["Altitude"] = pd.to_numeric(gps["Altitude"], errors="coerce")
-        if "Date & Time" in gps.columns:
-            gps["GPS Record Date" ] = pd.to_datetime(
-                gps["Date & Time"], errors="coerce", dayfirst=True, utc=True
-            )
-        else:
-            gps["GPS Record Date"] = pd.NaT
-
-        gps = gps.dropna(subset=["Latitude", "Longitude"])
-        # Keep one representative coordinate record per Division/Section/Mast.
-        gps = gps.sort_values("GPS Record Date", na_position="last")
-        gps = gps.drop_duplicates(
-            subset=["Division", "Section", "OHE Mast"], keep="last"
-        )
-        return gps.reset_index(drop=True)
-    except Exception:
-        return pd.DataFrame()
-
-
-def get_selected_gps_record(gps_df, division, section, mast):
-    if gps_df.empty or not all([division, section, mast]):
-        return None
-    match = gps_df[
-        (gps_df["Division"] == division)
-        & (gps_df["Section"] == section)
-        & (gps_df["OHE Mast"] == mast)
-    ]
-    return None if match.empty else match.iloc[0].to_dict()
-
-
-# ============================================================
-# OCR: AUTOMATIC STATION AND OHE MAST EXTRACTION
+# OCR: AUTOMATIC STATION, OHE MAST & SCALE TEMP EXTRACTION
 # ============================================================
 
 def normalize_ocr_text(text):
@@ -524,7 +454,6 @@ def extract_station_and_mast_from_image(image):
         r"\bmast\s*[:=\-]\s*([A-Z0-9][A-Z0-9/\-]*)"
     ]
 
-    # Search each OCR line to reduce accidental multi-line matches.
     for line in lines:
         if station is None:
             for pattern in station_patterns:
@@ -563,8 +492,6 @@ def extract_station_and_mast_from_image(image):
                         mast = value
                         break
 
-    # Conservative fallback: inspect separate labelled lines.
-    # This helps when OCR places a label and its value on separate lines.
     if station is None:
         for index, line in enumerate(lines[:-1]):
             if re.search(
@@ -603,6 +530,69 @@ def extract_station_and_mast_from_image(image):
     return station, mast, raw_text
 
 
+def extract_scale_temperatures_ocr(image):
+    """
+    Attempt to read printed Max/Min temperatures directly from the
+    thermal camera scale bar (right margin) and top/bottom overlays.
+    """
+    try:
+        rgb = np.array(image.convert("RGB"))
+        h, w = rgb.shape[:2]
+
+        crops = [
+            rgb[:, int(w * 0.84):],              # Right scale bar
+            rgb[:int(h * 0.14), :int(w * 0.55)], # Top-left overlay
+            rgb[int(h * 0.86):, :int(w * 0.55)]  # Bottom-left overlay
+        ]
+
+        extracted_temps = []
+
+        for crop in crops:
+            if crop.size == 0:
+                continue
+
+            gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+            enlarged = cv2.resize(
+                gray,
+                None,
+                fx=3,
+                fy=3,
+                interpolation=cv2.INTER_CUBIC
+            )
+
+            _, thresh_inv = cv2.threshold(
+                enlarged, 180, 255, cv2.THRESH_BINARY_INV
+            )
+            _, thresh_otsu = cv2.threshold(
+                enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )
+
+            for candidate in (thresh_inv, thresh_otsu):
+                text = pytesseract.image_to_string(
+                    candidate,
+                    config="--psm 6"
+                )
+                matches = re.findall(
+                    r"(?<!\d)(\d{1,2}\.\d{1,2})(?!\d)",
+                    text
+                )
+                for m in matches:
+                    val = float(m)
+                    if 1.0 <= val <= 120.0:
+                        extracted_temps.append(val)
+
+        if len(extracted_temps) >= 2:
+            min_t = float(min(extracted_temps))
+            max_t = float(max(extracted_temps))
+            if max_t > min_t:
+                return min_t, max_t
+
+    except Exception:
+        pass
+
+    return None, None
+
+
 def get_analysis_region(image):
     rgb = np.array(image.convert("RGB"))
     height, width = rgb.shape[:2]
@@ -631,29 +621,25 @@ def extract_features(image):
     h, s, v = cv2.split(hsv)
     l, a, b = cv2.split(lab)
 
-    mask = (v > 25) & (s > 20)
-
-    if np.count_nonzero(mask) < 20:
-        mask = np.ones(v.shape, dtype=bool)
-
+    # Preserve white-hot (s ~ 0, v ~ 255) and black-cold (v ~ 0) pixels
     features = [
-        np.mean(h[mask]),
-        np.std(h[mask]),
-        np.mean(s[mask]),
-        np.std(s[mask]),
-        np.mean(v[mask]),
-        np.std(v[mask]),
-        np.mean(l[mask]),
-        np.std(l[mask]),
-        np.mean(a[mask]),
-        np.std(a[mask]),
-        np.mean(b[mask]),
-        np.std(b[mask]),
-        np.percentile(v[mask], 10),
-        np.percentile(v[mask], 25),
-        np.percentile(v[mask], 50),
-        np.percentile(v[mask], 75),
-        np.percentile(v[mask], 90)
+        np.mean(h),
+        np.std(h),
+        np.mean(s),
+        np.std(s),
+        np.mean(v),
+        np.std(v),
+        np.mean(l),
+        np.std(l),
+        np.mean(a),
+        np.std(a),
+        np.mean(b),
+        np.std(b),
+        np.percentile(v, 1),
+        np.percentile(v, 25),
+        np.percentile(v, 50),
+        np.percentile(v, 75),
+        np.percentile(v, 99)
     ]
 
     return np.array(features, dtype=float)
@@ -663,6 +649,7 @@ def extract_features(image):
 # CALIBRATION MODEL
 # ============================================================
 
+@st.cache_resource
 def train_calibration_model():
     calibration_dir = "calibration_images"
 
@@ -680,9 +667,10 @@ def train_calibration_model():
         ):
             continue
 
-        stem = os.path.splitext(filename)[0]
+        _, stem_id = extract_image_timestamp(filename)
+        lookup_key = stem_id if stem_id in OEM_DATA else os.path.splitext(filename)[0]
 
-        if stem not in OEM_DATA:
+        if lookup_key not in OEM_DATA:
             continue
 
         try:
@@ -690,8 +678,8 @@ def train_calibration_model():
             feature_rows.append(extract_features(image))
 
             targets.append([
-                OEM_DATA[stem]["min"],
-                OEM_DATA[stem]["max"]
+                OEM_DATA[lookup_key]["min"],
+                OEM_DATA[lookup_key]["max"]
             ])
 
         except Exception:
@@ -733,7 +721,17 @@ def train_calibration_model():
         return None
 
 
-def predict_temperature(features, model):
+def predict_temperature(image, features, model):
+    # Step 1: Try reading printed scale bar / overlay temperatures via OCR
+    ocr_min, ocr_max = extract_scale_temperatures_ocr(image)
+    if ocr_min is not None and ocr_max is not None:
+        return (
+            ocr_min,
+            ocr_max,
+            "OCR scale extraction"
+        )
+
+    # Step 2: Use trained calibration model if calibration_images/ is present
     if model is not None:
         scaled = (
             features - model["mean"]
@@ -749,16 +747,16 @@ def predict_temperature(features, model):
         if minimum > maximum:
             minimum, maximum = maximum, minimum
 
-        minimum = float(np.clip(minimum, 0, 40))
-        maximum = float(np.clip(maximum, minimum, 40))
+        minimum = float(np.clip(minimum, 0, 60))
+        maximum = float(np.clip(maximum, minimum, 60))
 
         return (
-            minimum,
-            maximum,
+            round(minimum, 2),
+            round(maximum, 2),
             "Calibration model estimate"
         )
 
-    # Fallback only. RGB image colours are not actual temperature data.
+    # Step 3: Fallback using 1st and 99th brightness percentiles
     v_low = features[12]
     v_high = features[16]
 
@@ -768,12 +766,12 @@ def predict_temperature(features, model):
     if minimum > maximum:
         minimum, maximum = maximum, minimum
 
-    minimum = float(np.clip(minimum, 0, 40))
-    maximum = float(np.clip(maximum, minimum, 40))
+    minimum = float(np.clip(minimum, 0, 60))
+    maximum = float(np.clip(maximum, minimum, 60))
 
     return (
-        minimum,
-        maximum,
+        round(minimum, 2),
+        round(maximum, 2),
         "Unvalidated color-based estimate"
     )
 
@@ -818,13 +816,7 @@ def save_inspection(
     recommendation,
     temperature_source,
     station_name,
-    ohe_mast_number,
-    division=None,
-    section_name=None,
-    gps_latitude=None,
-    gps_longitude=None,
-    gps_altitude=None,
-    gps_record_datetime=None
+    ohe_mast_number
 ):
     conn = get_database_connection()
 
@@ -835,8 +827,8 @@ def save_inspection(
             minimum_temperature is not None
             and maximum_temperature is not None
         ):
-            temperature_difference = (
-                maximum_temperature - minimum_temperature
+            temperature_difference = round(
+                maximum_temperature - minimum_temperature, 3
             )
         else:
             temperature_difference = None
@@ -861,19 +853,12 @@ def save_inspection(
                     image_sha256,
                     image_data,
                     station_name,
-                    ohe_mast_number,
-                    division,
-                    section_name,
-                    gps_latitude,
-                    gps_longitude,
-                    gps_altitude,
-                    gps_record_datetime
+                    ohe_mast_number
                 )
                 VALUES (
                     %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s
                 )
                 RETURNING id;
                 """,
@@ -892,13 +877,7 @@ def save_inspection(
                     image_sha256,
                     psycopg2.Binary(image_bytes),
                     station_name,
-                    ohe_mast_number,
-                    division,
-                    section_name,
-                    gps_latitude,
-                    gps_longitude,
-                    gps_altitude,
-                    gps_record_datetime
+                    ohe_mast_number
                 )
             )
 
@@ -935,12 +914,6 @@ def load_inspections(limit=1000):
                     temperature_source,
                     station_name,
                     ohe_mast_number,
-                    division,
-                    section_name,
-                    gps_latitude,
-                    gps_longitude,
-                    gps_altitude,
-                    gps_record_datetime,
                     image_sha256
                 FROM thermal_inspections
                 ORDER BY uploaded_at DESC
@@ -1001,12 +974,6 @@ def load_all_export_records():
                     temperature_source,
                     station_name,
                     ohe_mast_number,
-                    division,
-                    section_name,
-                    gps_latitude,
-                    gps_longitude,
-                    gps_altitude,
-                    gps_record_datetime,
                     image_sha256,
                     OCTET_LENGTH(image_data) AS image_size_bytes
                 FROM thermal_inspections
@@ -1121,11 +1088,6 @@ def section_heading(title, caption=None):
 
 
 def set_navigation_page(page_name):
-    """
-    Streamlit invokes callbacks before rerunning the script.
-    Updating the radio key here avoids changing widget state
-    after the navigation widget has already been created.
-    """
     st.session_state["navigation_page"] = page_name
 
 
@@ -1380,20 +1342,19 @@ elif page == "Thermal Analysis Studio":
 
     render_hero(
         "Thermal Analysis Studio",
-        "Upload inspection images and link each one to its GPS-referenced "
-        "Division, Section and OHE Mast."
+        "Upload inspection images. Station and OHE mast details "
+        "can be extracted automatically using OCR or entered manually."
     )
 
     st.markdown(
         """
         <div class="info-card">
-            <h4>GPS-linked OHE mast selection</h4>
+            <h4>Station and OHE mast details</h4>
             <p>
-                Select Division, Section and OHE Mast for each uploaded image.
-                The matching GPS coordinates are attached to the saved inspection.
-                Station name can still be read by OCR or corrected manually.
-                The GPS timestamp is historical reference data, not the thermal
-                inspection timestamp.
+                OCR will attempt to read station and mast details from each image.
+                You can also enter or correct these details manually before saving.
+                A manual value takes priority over the OCR result. If neither is
+                available, the saved value will be "No record found".
             </p>
             <p>
                 Colour-based temperature estimates are not equivalent
@@ -1415,21 +1376,12 @@ elif page == "Thermal Analysis Studio":
     if uploaded_files:
         st.write(f"Images selected: **{len(uploaded_files)}**")
 
-        # Load GPS reference and provide cascading selectors for every image.
-        gps_df = load_gps_reference()
         manual_entries = {}
         section_heading(
-            "GPS Location & OHE Mast Selection",
-            "Choose Division → Section → OHE Mast for each image. "
-            "The selected mast coordinates will be saved with its thermal record."
+            "Station & OHE Mast Details",
+            "Enter values where OCR may not read the image correctly. "
+            "Leave a field blank to use its OCR result."
         )
-
-        if gps_df.empty:
-            st.error(
-                "GPS reference data was not loaded. Add the supplied CSV to "
-                "the repository as data/gps_reference.csv. Manual OCR metadata "
-                "will remain available only after the GPS file is added."
-            )
 
         for file_index, uploaded_file in enumerate(uploaded_files):
             file_key = hashlib.sha1(
@@ -1440,73 +1392,25 @@ elif page == "Thermal Analysis Studio":
                 f"Image {file_index + 1}: {clean_filename(uploaded_file.name)}",
                 expanded=(len(uploaded_files) == 1)
             ):
-                division_options = sorted(gps_df["Division"].dropna().unique().tolist()) if not gps_df.empty else []
-                division = st.selectbox(
-                    "Division", ["Select Division"] + division_options,
-                    key=f"gps_division_{file_key}"
-                )
+                station_col, mast_col = st.columns(2)
 
-                section_options = []
-                if division != "Select Division":
-                    section_options = sorted(
-                        gps_df.loc[gps_df["Division"] == division, "Section"].dropna().unique().tolist()
+                with station_col:
+                    manual_station = st.text_input(
+                        "Station Name (manual)",
+                        key=f"manual_station_{file_key}",
+                        placeholder="Enter station name"
                     )
-                section = st.selectbox(
-                    "Section", ["Select Section"] + section_options,
-                    key=f"gps_section_{file_key}",
-                    disabled=(division == "Select Division" or not section_options)
-                )
 
-                mast_options = []
-                if division != "Select Division" and section != "Select Section":
-                    mast_options = sorted(
-                        gps_df.loc[
-                            (gps_df["Division"] == division)
-                            & (gps_df["Section"] == section),
-                            "OHE Mast"
-                        ].dropna().unique().tolist()
+                with mast_col:
+                    manual_mast = st.text_input(
+                        "OHE Mast Number (manual)",
+                        key=f"manual_mast_{file_key}",
+                        placeholder="Enter OHE mast number"
                     )
-                mast = st.selectbox(
-                    "OHE Mast Number", ["Select OHE Mast"] + mast_options,
-                    key=f"gps_mast_{file_key}",
-                    disabled=(section == "Select Section" or not mast_options)
-                )
 
-                selected_gps = get_selected_gps_record(
-                    gps_df,
-                    division if division != "Select Division" else None,
-                    section if section != "Select Section" else None,
-                    mast if mast != "Select OHE Mast" else None
-                )
-
-                if selected_gps:
-                    gps_col1, gps_col2, gps_col3 = st.columns(3)
-                    gps_col1.metric("Latitude", f"{selected_gps['Latitude']:.6f}")
-                    gps_col2.metric("Longitude", f"{selected_gps['Longitude']:.6f}")
-                    altitude = selected_gps.get("Altitude")
-                    gps_col3.metric("Altitude", f"{altitude:.1f} m" if pd.notna(altitude) else "N/A")
-                    gps_date = selected_gps.get("GPS Record Date")
-                    if pd.notna(gps_date):
-                        st.caption(
-                            "Reference GPS timestamp: "
-                            + gps_date.strftime("%d %b %Y, %H:%M UTC")
-                            + " (historical reference; not the thermal inspection time)"
-                        )
-                else:
-                    st.caption("Select all three fields to retrieve the mast coordinates.")
-
-                manual_station = st.text_input(
-                    "Station Name (optional OCR correction)",
-                    key=f"manual_station_{file_key}",
-                    placeholder="Leave blank to use OCR"
-                )
-
-                manual_entries[uploaded_file.name] = {
+                manual_entries[ clean_filename(uploaded_file.name) ] = {
                     "station": manual_station.strip(),
-                    "division": division if division != "Select Division" else None,
-                    "section": section if section != "Select Section" else None,
-                    "mast": mast if mast != "Select OHE Mast" else None,
-                    "gps": selected_gps
+                    "mast": manual_mast.strip()
                 }
 
         if st.button(
@@ -1520,12 +1424,6 @@ elif page == "Thermal Analysis Studio":
                 st.error(
                     "Database unavailable. Check DATABASE_URL "
                     "in Streamlit Secrets."
-                )
-
-            elif any(not entry.get("gps") for entry in manual_entries.values()):
-                st.error(
-                    "Please select a valid Division, Section and OHE Mast "
-                    "for every uploaded image before analysis."
                 )
 
             else:
@@ -1576,7 +1474,6 @@ elif page == "Thermal Analysis Studio":
                             else NO_RECORD
                         )
 
-                        # Manual values override OCR; blank manual fields use OCR.
                         manual_values = manual_entries.get(filename, {})
                         if manual_values.get("station"):
                             station_name = manual_values["station"]
@@ -1584,11 +1481,12 @@ elif page == "Thermal Analysis Studio":
                         if manual_values.get("mast"):
                             mast_number = manual_values["mast"]
 
-                        gps_record = manual_values.get("gps")
-                        if gps_record:
-                            mast_number = manual_values["mast"]
-
-                        oem = OEM_DATA.get(image_id) if image_id else None
+                        # Match against full OEM_DATA key or filename stem
+                        stem_key = os.path.splitext(filename)[0]
+                        oem = (
+                            OEM_DATA.get(image_id)
+                            or OEM_DATA.get(stem_key)
+                        )
 
                         if oem:
                             minimum_temperature = float(oem["min"])
@@ -1602,15 +1500,15 @@ elif page == "Thermal Analysis Studio":
                                 minimum_temperature,
                                 maximum_temperature,
                                 temperature_source
-                            ) = predict_temperature(features, model)
+                            ) = predict_temperature(image, features, model)
 
-                        difference = (
-                            maximum_temperature - minimum_temperature
+                        difference = round(
+                            maximum_temperature - minimum_temperature, 3
                         )
 
-                        mean_temperature = (
-                            maximum_temperature + minimum_temperature
-                        ) / 2.0
+                        mean_temperature = round(
+                            (maximum_temperature + minimum_temperature) / 2.0, 3
+                        )
 
                         fault_status, recommendation = get_decision(
                             difference
@@ -1628,13 +1526,7 @@ elif page == "Thermal Analysis Studio":
                             recommendation=recommendation,
                             temperature_source=temperature_source,
                             station_name=station_name,
-                            ohe_mast_number=mast_number,
-                            division=manual_values.get("division"),
-                            section_name=manual_values.get("section"),
-                            gps_latitude=(gps_record.get("Latitude") if gps_record else None),
-                            gps_longitude=(gps_record.get("Longitude") if gps_record else None),
-                            gps_altitude=(gps_record.get("Altitude") if gps_record and pd.notna(gps_record.get("Altitude")) else None),
-                            gps_record_datetime=(gps_record.get("GPS Record Date") if gps_record and pd.notna(gps_record.get("GPS Record Date")) else None)
+                            ohe_mast_number=mast_number
                         )
 
                         batch_results.append({
@@ -1642,11 +1534,7 @@ elif page == "Thermal Analysis Studio":
                             "Filename": filename,
                             "Image ID": image_id,
                             "Station": station_name,
-                            "Division": manual_values.get("division"),
-                            "Section": manual_values.get("section"),
                             "OHE Mast": mast_number,
-                            "Latitude": gps_record.get("Latitude") if gps_record else None,
-                            "Longitude": gps_record.get("Longitude") if gps_record else None,
                             "Minimum °C": minimum_temperature,
                             "Maximum °C": maximum_temperature,
                             "Difference °C": difference,
@@ -1677,13 +1565,7 @@ elif page == "Thermal Analysis Studio":
                                 recommendation=str(exc)[:1000],
                                 temperature_source="Error",
                                 station_name=station_name,
-                                ohe_mast_number=mast_number,
-                                division=manual_values.get("division"),
-                                section_name=manual_values.get("section"),
-                                gps_latitude=(manual_values.get("gps", {}).get("Latitude") if manual_values.get("gps") else None),
-                                gps_longitude=(manual_values.get("gps", {}).get("Longitude") if manual_values.get("gps") else None),
-                                gps_altitude=(manual_values.get("gps", {}).get("Altitude") if manual_values.get("gps") and pd.notna(manual_values.get("gps", {}).get("Altitude")) else None),
-                                gps_record_datetime=(manual_values.get("gps", {}).get("GPS Record Date") if manual_values.get("gps") and pd.notna(manual_values.get("gps", {}).get("GPS Record Date")) else None)
+                                ohe_mast_number=mast_number
                             )
 
                         except Exception as save_exc:
@@ -2205,7 +2087,7 @@ elif page == "OEM Validation":
             "Image ID": image_id,
             "OEM Minimum °C": values["min"],
             "OEM Maximum °C": values["max"],
-            "OEM Difference °C": values["max"] - values["min"]
+            "OEM Difference °C": round(values["max"] - values["min"], 2)
         }
         for image_id, values in OEM_DATA.items()
     ])
