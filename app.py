@@ -8,6 +8,7 @@ import os
 import glob
 import re
 import hashlib
+import html
 import psycopg2
 import pytesseract
 
@@ -268,9 +269,9 @@ st.markdown(
 
     .status-badge-fault {
         display: inline-block;
-        background: rgba(239, 68, 68, 0.18);
-        color: #f87171;
-        border: 1px solid #ef4444;
+        background: rgba(220, 38, 38, 0.22);
+        color: #ef4444;
+        border: 1px solid #dc2626;
         border-radius: 8px;
         padding: 4px 12px;
         font-weight: 800;
@@ -279,9 +280,9 @@ st.markdown(
 
     .status-badge-ok {
         display: inline-block;
-        background: rgba(16, 185, 129, 0.18);
-        color: #34d399;
-        border: 1px solid #10b981;
+        background: rgba(22, 163, 74, 0.22);
+        color: #22c55e;
+        border: 1px solid #16a34a;
         border-radius: 8px;
         padding: 4px 12px;
         font-weight: 800;
@@ -299,7 +300,44 @@ st.markdown(
         font-size: 13px;
     }
 
-    /* Selectbox / Dropdown visibility in Dark UI */
+    /* ========================================================
+       1. DARK LABELS FOR STATION / SECTION & OHE MAST NUMBER
+       ======================================================== */
+    [data-testid="stExpander"] {
+        background-color: #f8fafc !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 14px !important;
+        margin-bottom: 14px !important;
+    }
+
+    [data-testid="stExpander"] summary,
+    [data-testid="stExpander"] summary * {
+        color: #0f172a !important;
+        font-weight: 700 !important;
+    }
+
+    [data-testid="stExpander"] [data-testid="stWidgetLabel"],
+    [data-testid="stExpander"] [data-testid="stWidgetLabel"] p,
+    [data-testid="stExpander"] label,
+    [data-testid="stExpander"] label p,
+    .dark-field-label {
+        color: #0f172a !important;
+        background-color: #e2e8f0 !important;
+        padding: 5px 12px !important;
+        border-radius: 6px !important;
+        font-weight: 700 !important;
+        font-size: 14px !important;
+        display: inline-block !important;
+        margin-bottom: 6px !important;
+        border: 1px solid #cbd5e1 !important;
+    }
+
+    [data-testid="stExpander"] [data-testid="stImageCaption"] {
+        color: #1e293b !important;
+        font-weight: 600 !important;
+    }
+
+    /* Selectbox / Dropdown visibility */
     div[data-baseweb="select"] > div {
         background-color: #142238 !important;
         color: #ffffff !important;
@@ -312,6 +350,105 @@ st.markdown(
         color: #ffffff !important;
     }
 
+    /* ========================================================
+       2. ANALYZED IMAGES & RESULTS — MAX / MIN / DIFF VISIBILITY
+       ======================================================== */
+    .temp-stats-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin: 12px 0 16px 0;
+    }
+
+    .temp-stat-box {
+        border-radius: 12px;
+        padding: 14px 16px;
+        border: 1px solid;
+    }
+
+    .temp-stat-max {
+        background: #fff1f2;
+        border-color: #fecdd3;
+    }
+
+    .temp-stat-max .temp-stat-label {
+        color: #9f1239;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .temp-stat-max .temp-stat-value {
+        color: #be123c;
+        font-size: 24px;
+        font-weight: 800;
+        margin-top: 4px;
+    }
+
+    .temp-stat-min {
+        background: #f0f9ff;
+        border-color: #bae6fd;
+    }
+
+    .temp-stat-min .temp-stat-label {
+        color: #075985;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .temp-stat-min .temp-stat-value {
+        color: #0369a1;
+        font-size: 24px;
+        font-weight: 800;
+        margin-top: 4px;
+    }
+
+    .temp-stat-diff {
+        background: #fffbeb;
+        border-color: #fde68a;
+    }
+
+    .temp-stat-diff .temp-stat-label {
+        color: #92400e;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .temp-stat-diff .temp-stat-value {
+        color: #b45309;
+        font-size: 24px;
+        font-weight: 800;
+        margin-top: 4px;
+    }
+
+    /* Fallback for standard st.metric widgets */
+    [data-testid="stMetric"] {
+        background-color: #f8fafc !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 12px !important;
+        padding: 12px 16px !important;
+    }
+
+    [data-testid="stMetricLabel"] p,
+    [data-testid="stMetricLabel"] {
+        color: #0f172a !important;
+        font-weight: 700 !important;
+    }
+
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricValue"] * {
+        color: #0369a1 !important;
+        font-weight: 800 !important;
+    }
+
+    /* ========================================================
+       4. BUTTONS — PRIMARY TEAL STYLE
+       ======================================================== */
     .stButton > button {
         border-radius: 10px;
         min-height: 42px;
@@ -320,9 +457,95 @@ st.markdown(
     }
 
     .stButton > button[kind="primary"] {
-        background: linear-gradient(90deg, #087e8b, #11a6b5);
-        color: white;
-        border: none;
+        background: linear-gradient(90deg, #087e8b, #11a6b5) !important;
+        color: #ffffff !important;
+        border: none !important;
+    }
+
+    /* ========================================================
+       5. STYLED TABLES — DISTINCT HEADER COLOR & FAULT STATUS
+       ======================================================== */
+    .krcl-table-wrapper {
+        overflow-x: auto;
+        border-radius: 12px;
+        border: 1px solid #263952;
+        margin-bottom: 18px;
+        background: #0f192a;
+    }
+
+    table.krcl-styled-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+        color: #e8eef8;
+    }
+
+    table.krcl-styled-table thead tr {
+        background: linear-gradient(90deg, #087e8b 0%, #123d59 100%);
+    }
+
+    table.krcl-styled-table thead th {
+        color: #fde047 !important;
+        font-weight: 800 !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-size: 12px;
+        padding: 12px 14px;
+        text-align: left;
+        border-bottom: 2px solid #2e8c9d;
+        white-space: nowrap;
+    }
+
+    table.krcl-styled-table tbody tr {
+        border-bottom: 1px solid #1e2f48;
+        transition: background 0.15s ease;
+    }
+
+    table.krcl-styled-table tbody tr:nth-child(even) {
+        background-color: #132036;
+    }
+
+    table.krcl-styled-table tbody tr:hover {
+        background-color: #1a2c47;
+    }
+
+    table.krcl-styled-table tbody td {
+        padding: 10px 14px;
+        color: #e2e8f0;
+        vertical-align: middle;
+    }
+
+    .cell-fault {
+        background-color: rgba(220, 38, 38, 0.22);
+        color: #ff4d4d !important;
+        border: 1px solid #dc2626;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 800;
+        display: inline-block;
+        font-size: 12px;
+    }
+
+    .cell-nofault {
+        background-color: rgba(22, 163, 74, 0.22);
+        color: #22c55e !important;
+        border: 1px solid #16a34a;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 800;
+        display: inline-block;
+        font-size: 12px;
+    }
+
+    .cell-pending {
+        background-color: rgba(245, 158, 11, 0.18);
+        color: #fbbf24 !important;
+        border: 1px solid #f59e0b;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 800;
+        display: inline-block;
+        font-size: 12px;
     }
 
     /* ========================================================
@@ -1217,6 +1440,59 @@ def set_navigation_page(page_name):
     st.session_state["navigation_page"] = page_name
 
 
+def render_styled_inspection_table(df, status_columns=("fault_status", "Status")):
+    """
+    Renders a table with colored column headers (#fde047 on teal gradient)
+    and conditional fault status badges (NO FAULT in green, FAULT in red).
+    """
+    if df.empty:
+        return
+
+    header_cells = "".join(
+        f"<th>{html.escape(str(col))}</th>" for col in df.columns
+    )
+
+    body_rows = []
+    for _, row in df.iterrows():
+        cells = []
+        for col in df.columns:
+            val = row[col]
+            if pd.isna(val):
+                display_str = "N/A"
+            elif isinstance(val, (datetime, pd.Timestamp)):
+                if val.tzinfo is not None:
+                    val = val.astimezone(IST)
+                display_str = val.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(val, float):
+                display_str = f"{val:.2f}"
+            else:
+                display_str = str(val)
+
+            if col in status_columns:
+                upper_val = display_str.strip().upper()
+                if upper_val == "NO FAULT":
+                    cell_html = f'<td><span class="cell-nofault">{html.escape(display_str)}</span></td>'
+                elif upper_val == "FAULT":
+                    cell_html = f'<td><span class="cell-fault">{html.escape(display_str)}</span></td>'
+                else:
+                    cell_html = f'<td><span class="cell-pending">{html.escape(display_str)}</span></td>'
+            else:
+                cell_html = f"<td>{html.escape(display_str)}</td>"
+
+            cells.append(cell_html)
+
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    table_html = (
+        '<div class="krcl-table-wrapper">'
+        '<table class="krcl-styled-table">'
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 # ============================================================
 # SIDEBAR NAVIGATION
 # ============================================================
@@ -1384,7 +1660,8 @@ if page == "Dashboard":
         "A quick view of saved inspection activity."
     )
 
-    left, right = st.columns([1.15, 0.85])
+    # 3. Reduced column chart size (smaller width ratio & reduced height=180)
+    left, right = st.columns([0.85, 1.15])
 
     with left:
         if not history.empty:
@@ -1395,7 +1672,7 @@ if page == "Dashboard":
 
             st.bar_chart(
                 chart_data.set_index("Status"),
-                height=280
+                height=180
             )
 
         else:
@@ -1424,8 +1701,10 @@ if page == "Dashboard":
             args=("Thermal Analysis Studio",)
         )
 
+        # 4. Matched View Inspection History color to Open Thermal Analysis Studio
         st.button(
             "View Inspection History",
+            type="primary",
             use_container_width=True,
             key="quick_open_history",
             on_click=set_navigation_page,
@@ -1452,10 +1731,10 @@ if page == "Dashboard":
             if col in recent.columns
         ]
 
-        st.dataframe(
+        # 5. Distinct header colors & NO FAULT (green) / FAULT (red)
+        render_styled_inspection_table(
             recent[available],
-            use_container_width=True,
-            hide_index=True
+            status_columns=("fault_status",)
         )
 
     else:
@@ -1812,22 +2091,33 @@ elif page == "Thermal Analysis Studio":
                         unsafe_allow_html=True
                     )
 
-                    m1, m2, m3 = st.columns(3)
                     max_val = item.get("Maximum °C")
                     min_val = item.get("Minimum °C")
                     diff_val = item.get("Difference °C")
 
-                    m1.metric(
-                        "Maximum °C",
-                        f"{max_val:.2f} °C" if max_val is not None else "N/A"
-                    )
-                    m2.metric(
-                        "Minimum °C",
-                        f"{min_val:.2f} °C" if min_val is not None else "N/A"
-                    )
-                    m3.metric(
-                        "Difference °C",
-                        f"{diff_val:.2f} °C" if diff_val is not None else "N/A"
+                    max_str = f"{max_val:.2f} °C" if max_val is not None else "N/A"
+                    min_str = f"{min_val:.2f} °C" if min_val is not None else "N/A"
+                    diff_str = f"{diff_val:.2f} °C" if diff_val is not None else "N/A"
+
+                    # 2. High-visibility Max / Min / Diff cards
+                    st.markdown(
+                        f"""
+                        <div class="temp-stats-grid">
+                            <div class="temp-stat-box temp-stat-max">
+                                <div class="temp-stat-label">Maximum °C</div>
+                                <div class="temp-stat-value">{max_str}</div>
+                            </div>
+                            <div class="temp-stat-box temp-stat-min">
+                                <div class="temp-stat-label">Minimum °C</div>
+                                <div class="temp-stat-value">{min_str}</div>
+                            </div>
+                            <div class="temp-stat-box temp-stat-diff">
+                                <div class="temp-stat-label">Difference °C</div>
+                                <div class="temp-stat-value">{diff_str}</div>
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
                     )
 
                     st.markdown(
@@ -1852,10 +2142,10 @@ elif page == "Thermal Analysis Studio":
             errors="ignore"
         )
 
-        st.dataframe(
+        # 5. Distinct header colors & NO FAULT (green) / FAULT (red)
+        render_styled_inspection_table(
             display_df,
-            use_container_width=True,
-            hide_index=True
+            status_columns=("Status",)
         )
 
         st.download_button(
@@ -1917,10 +2207,9 @@ elif page == "Fault Monitor":
     if faults.empty:
         st.success("No saved records currently carry FAULT status.")
     else:
-        st.dataframe(
+        render_styled_inspection_table(
             faults,
-            use_container_width=True,
-            hide_index=True
+            status_columns=("fault_status",)
         )
 
         st.download_button(
@@ -1934,17 +2223,15 @@ elif page == "Fault Monitor":
         )
 
     with st.expander("View NO FAULT records"):
-        st.dataframe(
+        render_styled_inspection_table(
             no_faults,
-            use_container_width=True,
-            hide_index=True
+            status_columns=("fault_status",)
         )
 
     with st.expander("View NOT ANALYZED records"):
-        st.dataframe(
+        render_styled_inspection_table(
             pending,
-            use_container_width=True,
-            hide_index=True
+            status_columns=("fault_status",)
         )
 
 
@@ -2043,10 +2330,9 @@ elif page == "Inspection History":
         f"**{len(filtered):,}** matching inspection records"
     )
 
-    st.dataframe(
+    render_styled_inspection_table(
         filtered,
-        use_container_width=True,
-        hide_index=True
+        status_columns=("fault_status",)
     )
 
     section_heading(
@@ -2175,7 +2461,7 @@ elif page == "Analytics":
         .to_frame("Records")
     )
 
-    st.bar_chart(status_counts)
+    st.bar_chart(status_counts, height=180)
 
     section_heading("Temperature Difference Distribution")
 
@@ -2307,10 +2593,9 @@ elif page == "Export Center":
         )
 
     with st.expander("Preview export dataset"):
-        st.dataframe(
+        render_styled_inspection_table(
             export_df,
-            use_container_width=True,
-            hide_index=True
+            status_columns=("fault_status",)
         )
 
 
