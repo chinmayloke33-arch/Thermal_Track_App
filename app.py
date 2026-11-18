@@ -1112,10 +1112,22 @@ def isolate_ohe_wire_mask(rgb, temp_map, scale_min, scale_max):
     hough_wire_corridor = np.zeros((h, w), dtype=np.uint8)
     if lines is not None:
         for line in lines:
-            x1, y1, x2, y2 = line[0]
+            # OpenCV versions may return HoughLinesP coordinates as either
+            # (N, 1, 4) or (N, 4). Flatten each detected line before unpacking.
+            coordinates = np.asarray(line).reshape(-1)
+            if coordinates.size != 4:
+                continue
+
+            x1, y1, x2, y2 = (int(value) for value in coordinates)
             angle_deg = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
             if angle_deg <= 16.0:
-                cv2.line(hough_wire_corridor, (x1, y1), (x2, y2), 255, thickness=7)
+                cv2.line(
+                    hough_wire_corridor,
+                    (x1, y1),
+                    (x2, y2),
+                    255,
+                    thickness=7
+                )
 
     clean_wire_mask = cv2.bitwise_and(thin_candidates, hough_wire_corridor)
     clean_wire_mask = cv2.bitwise_and(clean_wire_mask, cv2.bitwise_not(clamp_exclusion_zone))
