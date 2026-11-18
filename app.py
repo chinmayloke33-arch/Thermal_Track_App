@@ -1779,7 +1779,7 @@ if page == "Dashboard":
 
 
 # ============================================================
-# THERMAL ANALYSIS STUDIO (Upload -> Click Analyse -> Show Natural Scan Results)
+# THERMAL ANALYSIS STUDIO
 # ============================================================
 
 elif page == "Thermal Analysis Studio":
@@ -1787,7 +1787,7 @@ elif page == "Thermal Analysis Studio":
     render_hero(
         "Thermal Analysis Studio",
         "Upload inspection images and click 'Analyse Images & Save Records' "
-        "for natural OHE wire temperature scanning and fault classification."
+        "to directly view OHE wire temperatures and fault status."
     )
 
     uploaded_files = st.file_uploader(
@@ -1818,7 +1818,7 @@ elif page == "Thermal Analysis Studio":
                 image_bytes = uploaded_file.getvalue()
 
                 status_text.write(
-                    f"Scanning {index + 1} of {total_files}: "
+                    f"Processing {index + 1} of {total_files}: "
                     f"{filename}"
                 )
 
@@ -1959,14 +1959,14 @@ elif page == "Thermal Analysis Studio":
             st.session_state["batch_results"] = batch_results
 
             st.success(
-                "Natural thermal scanning completed. Check the visual inspection "
+                "Batch processing completed. Check the visual inspection "
                 "cards and table below."
             )
 
     if "batch_results" in st.session_state:
         section_heading(
             "Analyzed Images & Results",
-            "Visual review of each uploaded thermal image alongside its naturally scanned OHE wire parameters."
+            "Visual review of each uploaded thermal image alongside its extracted parameters."
         )
 
         for item in st.session_state["batch_results"]:
