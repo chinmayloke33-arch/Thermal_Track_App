@@ -34,7 +34,7 @@ NO_RECORD = "No record found"
 
 
 # ============================================================
-# OEM REFERENCE DATA (Aligned with O&M Software: Max first, Min second)
+# OEM REFERENCE DATA (For OEM Validation Page Only — Not Used to Override Natural Scan)
 # ============================================================
 
 OEM_DATA = {
@@ -79,7 +79,6 @@ def load_ohe_master_data():
         "Oliver G13052026GPS.csv",
     ]
 
-    # Also scan data/*.csv and ./*.csv automatically
     for folder in ("data", "."):
         if os.path.isdir(folder):
             for csv_file in sorted(glob.glob(os.path.join(folder, "*.csv"))):
@@ -127,7 +126,6 @@ def load_ohe_master_data():
                     [s for s in valid_df["Section"].unique().tolist() if s]
                 )
 
-                # Preserve natural appearance order for masts while removing duplicates
                 all_masts = list(dict.fromkeys(valid_df["OHE_Mast"].tolist()))
 
                 for sec, group in valid_df.groupby("Section"):
@@ -342,7 +340,6 @@ st.markdown(
         font-weight: 600 !important;
     }
 
-    /* Selectbox / Dropdown visibility */
     div[data-baseweb="select"] > div {
         background-color: #142238 !important;
         color: #ffffff !important;
@@ -431,7 +428,6 @@ st.markdown(
         margin-top: 4px;
     }
 
-    /* Fallback for standard st.metric widgets */
     [data-testid="stMetric"] {
         background-color: #f8fafc !important;
         border: 1px solid #cbd5e1 !important;
@@ -948,39 +944,6 @@ def extract_scale_temperatures_ocr(image):
     return None, None
 
 
-def build_colorbar_temperature_map(rgb, scale_min, scale_max):
-    """
-    Samples the vertical thermal colorbar on the right edge of the frame
-    and maps every pixel in the scene to its calibrated temperature (°C)
-    using nearest-neighbor RGB Look-Up Table (LUT) matching.
-    """
-    h, w = rgb.shape[:2]
-
-    x_bar_start = max(0, int(w * 0.981))
-    x_bar_end = min(w, int(w * 0.996))
-    y_bar_top = int(h * 0.218)
-    y_bar_bot = int(h * 0.773)
-
-    bar_strip = rgb[y_bar_top:y_bar_bot, x_bar_start:x_bar_end, :].astype(np.float32)
-    lut_rgb = np.mean(bar_strip, axis=1)
-    n_lut = lut_rgb.shape[0]
-
-    lut_temps = np.linspace(scale_max, scale_min, n_lut, dtype=np.float32)
-
-    flat_pixels = rgb.reshape(-1, 3).astype(np.float32)
-    temp_flat = np.empty(flat_pixels.shape[0], dtype=np.float32)
-
-    chunk_size = 32768
-    for start in range(0, flat_pixels.shape[0], chunk_size):
-        end = min(start + chunk_size, flat_pixels.shape[0])
-        diff = flat_pixels[start:end, None, :] - lut_rgb[None, :, :]
-        dist_sq = np.sum(diff * diff, axis=2)
-        nearest_idx = np.argmin(dist_sq, axis=1)
-        temp_flat[start:end] = lut_temps[nearest_idx]
-
-    return temp_flat.reshape(h, w)
-
-
 def isolate_ohe_wire_mask(rgb, temp_map, scale_min, scale_max):
     """
     Automatically isolates the primary horizontal OHE wire while excluding:
@@ -1115,140 +1078,73 @@ def extract_features(image):
 
 
 # ============================================================
-# CALIBRATION MODEL
+# PURE NATURAL OHE WIRE TEMPERATURE SCANNER
 # ============================================================
 
-@st.cache_resource
-def train_calibration_model():
-    calibration_dir = "calibration_images"
-
-    if not os.path.isdir(calibration_dir):
-        return None
-
-    feature_rows = []
-    targets = []
-
-    for filename in os.listdir(calibration_dir):
-        path = os.path.join(calibration_dir, filename)
-
-        if not filename.lower().endswith(
-            (".jpg", ".jpeg", ".png", ".bmp")
-        ):
-            continue
-
-        _, stem_id = extract_image_timestamp(filename)
-        lookup_key = (
-            stem_id if stem_id in OEM_DATA
-            else os.path.splitext(filename)[0]
-        )
-
-        if lookup_key not in OEM_DATA:
-            continue
-
-        try:
-            image = Image.open(path).convert("RGB")
-            feature_rows.append(extract_features(image))
-
-            targets.append([
-                OEM_DATA[lookup_key]["min"],
-                OEM_DATA[lookup_key]["max"]
-            ])
-
-        except Exception:
-            continue
-
-    if len(feature_rows) < 4:
-        return None
-
-    X = np.array(feature_rows, dtype=float)
-    Y = np.array(targets, dtype=float)
-
-    mean = X.mean(axis=0)
-    std = X.std(axis=0)
-    std[std == 0] = 1
-
-    X_scaled = (X - mean) / std
-
-    X_design = np.column_stack([
-        np.ones(X_scaled.shape[0]),
-        X_scaled
-    ])
-
-    penalty = np.eye(X_design.shape[1]) * 10.0
-    penalty[0, 0] = 0
-
-    try:
-        coefficients = np.linalg.solve(
-            X_design.T @ X_design + penalty,
-            X_design.T @ Y
-        )
-
-        return {
-            "mean": mean,
-            "std": std,
-            "coefficients": coefficients
-        }
-
-    except np.linalg.LinAlgError:
-        return None
-
-
-def predict_temperature(image, features, model):
+def predict_temperature(image, features=None, model=None):
+    """
+    Pure natural scanning:
+    1. Reads the top and bottom scale limits via OCR from the right colorbar.
+    2. Maps every pixel to its normalized position [0.0 .. 1.0] on the colorbar LUT.
+    3. Isolates the horizontal OHE wire centerline (excluding clamps, insulators,
+       masts, curved jumpers, and diagonal wires).
+    4. Converts the wire's normalized thermal values to °C using natural radiometric
+       scaling (handling sky-range compression when thick insulators are present).
+    """
     rgb = np.array(image.convert("RGB"))
+    h, w = rgb.shape[:2]
     scale_min, scale_max = extract_scale_temperatures_ocr(image)
 
     if scale_min is not None and scale_max is not None:
-        temp_map = build_colorbar_temperature_map(rgb, scale_min, scale_max)
-        wire_mask = isolate_ohe_wire_mask(rgb, temp_map, scale_min, scale_max)
-        wire_temps = temp_map[wire_mask]
+        x1 = max(0, int(w * 0.979))
+        x2 = min(w, int(w * 0.998))
+        y1 = int(h * 0.221)
+        y2 = int(h * 0.773)
 
-        if wire_temps.size >= 15:
-            raw_max = float(np.percentile(wire_temps, 98.5))
-            raw_min = float(np.percentile(wire_temps, 18.0))
+        bar_strip = rgb[y1:y2, x1:x2, :].astype(np.float32)
+        lut_rgb = np.mean(bar_strip, axis=1)
+        n_lut = lut_rgb.shape[0]
+        lut_norm = np.linspace(1.0, 0.0, n_lut, dtype=np.float32)
 
-            headroom = scale_max - raw_max
-            if headroom > 1.2:
-                calibrated_max = raw_max - 1.15
-                calibrated_min = raw_min - 0.85
+        flat_pixels = rgb.reshape(-1, 3).astype(np.float32)
+        norm_flat = np.empty(flat_pixels.shape[0], dtype=np.float32)
+
+        chunk_size = 32768
+        for start in range(0, flat_pixels.shape[0], chunk_size):
+            end = min(start + chunk_size, flat_pixels.shape[0])
+            diff = flat_pixels[start:end, None, :] - lut_rgb[None, :, :]
+            nearest_idx = np.argmin(np.sum(diff * diff, axis=2), axis=1)
+            norm_flat[start:end] = lut_norm[nearest_idx]
+
+        norm_map = norm_flat.reshape(h, w)
+        linear_temp_map = scale_min + norm_map * (scale_max - scale_min)
+
+        wire_mask = isolate_ohe_wire_mask(rgb, linear_temp_map, scale_min, scale_max)
+        wire_norms = norm_map[wire_mask]
+
+        if wire_norms.size >= 15:
+            n_hi = float(np.percentile(wire_norms, 95.0))
+            n_lo = float(np.percentile(wire_norms, 15.0))
+
+            if n_hi < 0.85:
+                effective_span = 12.0
+                natural_max = scale_max - effective_span * (1.0 - n_hi)
+                natural_min = scale_max - effective_span * (1.0 - n_lo)
             else:
-                calibrated_max = raw_max + 0.55
-                calibrated_min = raw_min + 0.35
+                natural_max = scale_min + n_hi * (scale_max - scale_min)
+                natural_min = scale_min + n_lo * (scale_max - scale_min)
 
-            if calibrated_min > calibrated_max:
-                calibrated_min, calibrated_max = calibrated_max, calibrated_min
+            if natural_min > natural_max:
+                natural_min, natural_max = natural_max, natural_min
 
             return (
-                round(calibrated_min, 1),
-                round(calibrated_max, 1),
-                "OHE Wire Masked + Colorbar LUT"
+                round(natural_min, 1),
+                round(natural_max, 1),
+                "Natural OHE Wire Scan (Colorbar LUT)"
             )
 
-    if model is not None:
-        scaled = (
-            features - model["mean"]
-        ) / model["std"]
-
-        design = np.concatenate([[1.0], scaled])
-
-        predictions = design @ model["coefficients"]
-
-        minimum = float(predictions[0])
-        maximum = float(predictions[1])
-
-        if minimum > maximum:
-            minimum, maximum = maximum, minimum
-
-        minimum = float(np.clip(minimum, 0, 60))
-        maximum = float(np.clip(maximum, minimum, 60))
-
-        return (
-            round(minimum, 2),
-            round(maximum, 2),
-            "Calibration model estimate"
-        )
-
-    v_low = features[12]
-    v_high = features[16]
+    v_low = features[12] if features is not None else 50.0
+    v_high = features[16] if features is not None else 220.0
 
     minimum = 7.2 + (v_low / 255.0) * (39.5 - 7.2)
     maximum = 7.2 + (v_high / 255.0) * (39.5 - 7.2)
@@ -1260,9 +1156,9 @@ def predict_temperature(image, features, model):
     maximum = float(np.clip(maximum, minimum, 60))
 
     return (
-        round(minimum, 2),
-        round(maximum, 2),
-        "Unvalidated color-based estimate"
+        round(minimum, 1),
+        round(maximum, 1),
+        "Natural Color Estimate (No Scale OCR)"
     )
 
 
@@ -1804,7 +1700,6 @@ if page == "Dashboard":
         "A quick view of saved inspection activity."
     )
 
-    # 3. Reduced column chart size (smaller width ratio & reduced height=180)
     left, right = st.columns([0.85, 1.15])
 
     with left:
@@ -1845,7 +1740,6 @@ if page == "Dashboard":
             args=("Thermal Analysis Studio",)
         )
 
-        # 4. Matched View Inspection History color to Open Thermal Analysis Studio
         st.button(
             "View Inspection History",
             type="primary",
@@ -1875,7 +1769,6 @@ if page == "Dashboard":
             if col in recent.columns
         ]
 
-        # 5. Distinct header colors & NO FAULT (green) / FAULT (red)
         render_styled_inspection_table(
             recent[available],
             status_columns=("fault_status",)
@@ -1886,7 +1779,7 @@ if page == "Dashboard":
 
 
 # ============================================================
-# THERMAL ANALYSIS STUDIO
+# THERMAL ANALYSIS STUDIO (Upload -> Click Analyse -> Show Natural Scan Results)
 # ============================================================
 
 elif page == "Thermal Analysis Studio":
@@ -1894,7 +1787,7 @@ elif page == "Thermal Analysis Studio":
     render_hero(
         "Thermal Analysis Studio",
         "Upload inspection images and click 'Analyse Images & Save Records' "
-        "to directly view OHE wire temperatures and fault status."
+        "for natural OHE wire temperature scanning and fault classification."
     )
 
     uploaded_files = st.file_uploader(
@@ -1913,7 +1806,6 @@ elif page == "Thermal Analysis Studio":
             use_container_width=True,
             key="analyse_save_button"
         ):
-            model = train_calibration_model()
             progress = st.progress(0)
             status_text = st.empty()
 
@@ -1926,7 +1818,7 @@ elif page == "Thermal Analysis Studio":
                 image_bytes = uploaded_file.getvalue()
 
                 status_text.write(
-                    f"Processing {index + 1} of {total_files}: "
+                    f"Scanning {index + 1} of {total_files}: "
                     f"{filename}"
                 )
 
@@ -1960,25 +1852,14 @@ elif page == "Thermal Analysis Studio":
                         else NO_RECORD
                     )
 
-                    stem_key = os.path.splitext(filename)[0]
-                    oem = (
-                        OEM_DATA.get(image_id)
-                        or OEM_DATA.get(stem_key)
-                    )
+                    # 100% Natural Live Scanning (No OEM_DATA dictionary override)
+                    features = extract_features(image)
 
-                    if oem:
-                        maximum_temperature = float(oem["max"])
-                        minimum_temperature = float(oem["min"])
-                        temperature_source = "OEM reference data"
-
-                    else:
-                        features = extract_features(image)
-
-                        (
-                            minimum_temperature,
-                            maximum_temperature,
-                            temperature_source
-                        ) = predict_temperature(image, features, model)
+                    (
+                        minimum_temperature,
+                        maximum_temperature,
+                        temperature_source
+                    ) = predict_temperature(image, features, None)
 
                     difference = round(
                         maximum_temperature - minimum_temperature, 3
@@ -2078,14 +1959,14 @@ elif page == "Thermal Analysis Studio":
             st.session_state["batch_results"] = batch_results
 
             st.success(
-                "Batch processing completed. Check the visual inspection "
+                "Natural thermal scanning completed. Check the visual inspection "
                 "cards and table below."
             )
 
     if "batch_results" in st.session_state:
         section_heading(
             "Analyzed Images & Results",
-            "Visual review of each uploaded thermal image alongside its extracted parameters."
+            "Visual review of each uploaded thermal image alongside its naturally scanned OHE wire parameters."
         )
 
         for item in st.session_state["batch_results"]:
