@@ -940,198 +940,6 @@ def extract_scale_temperatures_ocr(image):
     return None, None
 
 
-def extract_scale_endpoints_with_position(image):
-    """Read the top and bottom temperature labels beside the colour bar.
-
-    These OCR values are used ONLY to calibrate the colour palette; they are
-    never returned as the measured wire temperatures.
-    """
-    try:
-        rgb = np.array(image.convert("RGB"))
-        height, width = rgb.shape[:2]
-        crop = rgb[:, int(width * 0.88):]
-        if crop.size == 0:
-            return None, None
-
-        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-        enlarged = cv2.resize(gray, None, fx=3, fy=3,
-                              interpolation=cv2.INTER_CUBIC)
-        data = pytesseract.image_to_data(
-            enlarged, config="--psm 11", output_type=pytesseract.Output.DICT
-        )
-        candidates = []
-        for i, raw in enumerate(data.get("text", [])):
-            token = str(raw).strip().replace(",", ".")
-            match = re.search(r"(?<!\d)([+-]?\d{1,3}\.\d{1,2})(?!\d)", token)
-            if not match:
-                continue
-            try:
-                confidence = float(data.get("conf", ["-1"])[i])
-            except (ValueError, TypeError, IndexError):
-                confidence = -1
-            if confidence < 0:
-                continue
-            value = float(match.group(1))
-            if -100.0 <= value <= 200.0:
-                center_y = (float(data["top"][i]) + float(data["height"][i]) / 2) / 3
-                candidates.append((center_y, value))
-
-        if len(candidates) < 2:
-            return None, None
-        candidates.sort(key=lambda item: item[0])
-        # The scale labels are the highest and lowest numeric labels in the crop.
-        return float(candidates[0][1]), float(candidates[-1][1])
-    except Exception:
-        return None, None
-
-
-def extract_vertical_palette(rgb):
-    """Extract the actual vertical colour-bar colours from the image's right edge."""
-    height, width = rgb.shape[:2]
-    # Keep the strip tight to the extreme right edge so the purple scene
-    # background and the numeric labels are not mistaken for the palette.
-    x_start = int(width * 0.975)
-    x_end = max(x_start + 1, int(width * 0.999))
-    strip = rgb[:, x_start:x_end]
-    hsv = cv2.cvtColor(strip, cv2.COLOR_RGB2HSV)
-
-    # Saturated pixels identify the colour bar; white/grey scale labels are rejected.
-    colourful = (hsv[:, :, 1] >= 75) & (hsv[:, :, 2] >= 35)
-    row_counts = colourful.sum(axis=1)
-    min_count = max(1, int(strip.shape[1] * 0.70))
-    active_rows = row_counts >= min_count
-
-    # Find the longest continuous vertical run, which should be the palette bar.
-    runs = []
-    start = None
-    for y, active in enumerate(active_rows):
-        if active and start is None:
-            start = y
-        elif not active and start is not None:
-            if y - start >= max(12, int(height * 0.12)):
-                runs.append((start, y))
-            start = None
-    if start is not None and height - start >= max(12, int(height * 0.12)):
-        runs.append((start, height))
-    if not runs:
-        return None
-
-    y1, y2 = max(runs, key=lambda run: run[1] - run[0])
-    palette = []
-    for y in range(y1, y2):
-        row_pixels = strip[y][colourful[y]]
-        if len(row_pixels):
-            palette.append(np.median(row_pixels, axis=0))
-        else:
-            palette.append([np.nan, np.nan, np.nan])
-
-    palette = np.asarray(palette, dtype=np.float32)
-    valid = np.isfinite(palette).all(axis=1)
-    if valid.sum() < 12:
-        return None
-
-    # Fill occasional gaps in the bar by interpolating each RGB channel.
-    positions = np.arange(len(palette))
-    for channel in range(3):
-        palette[:, channel] = np.interp(
-            positions, positions[valid], palette[valid, channel]
-        )
-    return palette
-
-
-def analyze_wire_temperatures(image):
-    """Measure thermal pixels belonging to visible wires/components.
-
-    The colour scale is used only as a colour-to-temperature calibration
-    reference. The scale pixels themselves are excluded from the inspection.
-    """
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    height, width = rgb.shape[:2]
-
-    top_temp, bottom_temp = extract_scale_endpoints_with_position(image)
-    if top_temp is None or bottom_temp is None or abs(top_temp - bottom_temp) < 0.1:
-        return None, None, None, "Scale calibration unavailable — not analyzed"
-
-    palette = extract_vertical_palette(rgb)
-    if palette is None or len(palette) < 12:
-        return None, None, None, "Thermal colour bar not detected — not analyzed"
-
-    # Exclude the scale and its printed labels; analyse the scene area only.
-    x1, x2 = int(width * 0.02), int(width * 0.94)
-    y1, y2 = int(height * 0.03), int(height * 0.97)
-    scene = rgb[y1:y2, x1:x2]
-    hsv = cv2.cvtColor(scene, cv2.COLOR_RGB2HSV)
-
-    # Thermal conductors/components are saturated, brighter structures in this
-    # rendered palette. This suppresses the dark, nearly uniform background.
-    hue, saturation, value = cv2.split(hsv)
-    # In the supplied camera palette, the OHE conductors/components render
-    # orange-to-yellow while the scene background is dark purple. This
-    # chromatic separation prevents the background from becoming a huge mask.
-    candidate = (
-        (hue <= 45)
-        & (saturation >= 70)
-        & (value >= 75)
-    )
-
-    # Remove isolated compression noise and bridge tiny gaps in thin conductors.
-    mask = (candidate.astype(np.uint8) * 255)
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8), iterations=1)
-
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    cleaned = np.zeros(mask.shape, dtype=np.uint8)
-    for component in range(1, count):
-        area = int(stats[component, cv2.CC_STAT_AREA])
-        if area >= 2:
-            cleaned[labels == component] = 255
-
-    ys, xs = np.where(cleaned > 0)
-    if len(xs) < 10:
-        return None, None, None, "OHE wire/component pixels not confidently detected — not analyzed"
-    if len(xs) > int(cleaned.size * 0.22):
-        return None, None, None, "Wire segmentation is ambiguous — not analyzed"
-
-    pixels = scene[ys, xs].astype(np.float32)
-    palette = palette.astype(np.float32)
-
-    # Map each detected scene pixel to its nearest colour in the camera's own
-    # displayed palette, then interpolate temperature along the palette axis.
-    nearest_indices = np.empty(len(pixels), dtype=np.int32)
-    nearest_distances = np.empty(len(pixels), dtype=np.float32)
-    chunk_size = 12000
-    for start in range(0, len(pixels), chunk_size):
-        chunk = pixels[start:start + chunk_size]
-        distances = np.sum((chunk[:, None, :] - palette[None, :, :]) ** 2, axis=2)
-        nearest = np.argmin(distances, axis=1)
-        nearest_indices[start:start + len(chunk)] = nearest
-        nearest_distances[start:start + len(chunk)] = np.sqrt(distances[np.arange(len(chunk)), nearest])
-
-    # Reject colours that do not resemble the palette (e.g. annotations/text).
-    accepted = nearest_distances <= 85.0
-    if int(accepted.sum()) < 10:
-        return None, None, None, "No reliable palette-matched wire pixels — not analyzed"
-
-    palette_position = nearest_indices[accepted] / max(1, len(palette) - 1)
-    pixel_temperatures = top_temp + palette_position * (bottom_temp - top_temp)
-
-    # Percentiles reduce single-pixel JPEG artefacts while retaining wire hot spots.
-    minimum = float(np.percentile(pixel_temperatures, 1))
-    maximum = float(np.percentile(pixel_temperatures, 99))
-    mean = float(np.mean(pixel_temperatures))
-
-    if not np.isfinite([minimum, maximum, mean]).all() or maximum < minimum:
-        return None, None, None, "Invalid wire temperature mapping — not analyzed"
-
-    return (
-        round(minimum, 2),
-        round(maximum, 2),
-        round(mean, 2),
-        "OHE wire/component pixels mapped to image colour scale (estimated)"
-    )
-
-
 def get_analysis_region(image):
     rgb = np.array(image.convert("RGB"))
     height, width = rgb.shape[:2]
@@ -1263,13 +1071,8 @@ def train_calibration_model():
 
 
 def predict_temperature(image, features, model):
-    ocr_min, ocr_max = extract_scale_temperatures_ocr(image)
-    if ocr_min is not None and ocr_max is not None:
-        return (
-            ocr_min,
-            ocr_max,
-            "OCR scale extraction"
-        )
+    # NOTE: the palette-scale labels are the display range, not wire temperatures,
+    # so they are no longer returned here. Use the measurement-line workflow instead.
 
     if model is not None:
         scaled = (
@@ -1312,6 +1115,137 @@ def predict_temperature(image, features, model):
         round(maximum, 2),
         "Unvalidated color-based estimate"
     )
+
+
+# ============================================================
+# COLOUR-BAR CALIBRATED TEMPERATURE (operator measurement box)
+# ============================================================
+# The thermal JPG carries a palette bar. Its top/bottom labels are the
+# display range (NOT the wire temperatures), so temperatures are recovered
+# by matching each pixel colour to the bar, then measured inside a box the
+# operator draws along the hot wire/joint - the same workflow as the O&M software.
+
+def remove_camera_markers(rgb):
+    """Inpaint camera overlay marks (pure-red spot crosshair, pure-blue corner mark)."""
+    r = rgb.astype(int)
+    m = (
+        ((r[..., 0] > 200) & (r[..., 1] < 60) & (r[..., 2] < 60))
+        | ((r[..., 2] > 200) & (r[..., 0] < 60) & (r[..., 1] < 60))
+    ).astype(np.uint8)
+    m[:, int(rgb.shape[1] * 0.92):] = 0
+    m[int(rgb.shape[0] * 0.88):, :] = 0
+    if m.sum() == 0:
+        return rgb
+    m = cv2.dilate(m, np.ones((5, 5), np.uint8))
+    return cv2.inpaint(rgb, m, 3, cv2.INPAINT_TELEA)
+
+
+def find_colorbar(rgb):
+    """Return (x, y_top, y_bottom) of the palette bar on the right edge, or None."""
+    try:
+        h, w = rgb.shape[:2]
+        x = w - 1
+        col = rgb[:, x].astype(int).sum(axis=1)
+        y0 = next(y for y in range(int(h * 0.1), h) if col[y] > 650)
+        lo, hi = y0 + int(h * 0.50), min(h - 1, y0 + int(h * 0.65))
+        dmin = col[lo:hi].min()
+        y1 = next(y for y in range(lo, hi) if col[y] <= dmin + 15)
+        while y1 + 1 < h and col[y1 + 1] <= dmin + 15:
+            y1 += 1
+        if y1 - y0 < 100:
+            return None
+        return x, y0, y1
+    except Exception:
+        return None
+
+
+def _ocr_signed_number(crop):
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    gray = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    for thr in (150, 120, 180, 100, 200):
+        _, th = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY_INV)
+        th = cv2.copyMakeBorder(th, 16, 16, 40, 16, cv2.BORDER_CONSTANT, value=255)
+        for psm in (7, 8, 13):
+            text = pytesseract.image_to_string(
+                th,
+                config=f"--psm {psm} -c tessedit_char_whitelist=0123456789.-"
+            )
+            m = re.search(r"-?\d{1,3}\.\d", text.replace(" ", ""))
+            if m:
+                return float(m.group(0))
+    return None
+
+
+def read_scale_labels(rgb):
+    """Read the palette top (max) and bottom (min) labels, keeping the minus sign."""
+    bar = find_colorbar(rgb)
+    if bar is None:
+        return None, None
+    _, y0, y1 = bar
+    h, w = rgb.shape[:2]
+    x_from = int(w * 0.88)
+    top = rgb[max(0, y0 - 30):y0 + 4, x_from:]
+    bottom = rgb[y1 - 4:min(h, y1 + 36), x_from:]
+    return _ocr_signed_number(bottom), _ocr_signed_number(top)   # (min, max)
+
+
+def temperature_map_from_scale(rgb, t_min, t_max):
+    """Per-pixel temperature from the image's own colour bar (linear palette assumed)."""
+    rgb = remove_camera_markers(rgb)
+    bar = find_colorbar(rgb)
+    if bar is None:
+        raise ValueError("Colour bar not found in the image.")
+    x, y0, y1 = bar
+    strip = rgb[y0 + 1:y1 - 1, x - 8:x - 2].mean(axis=1)
+    temps = np.linspace(t_max, t_min, len(strip))
+    lab_strip = cv2.cvtColor(
+        strip.astype(np.uint8)[None], cv2.COLOR_RGB2LAB
+    )[0].astype(np.float32)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    h, w = lab.shape[:2]
+    flat = lab.reshape(-1, 3)
+    idx = np.empty(len(flat), dtype=np.int32)
+    for i in range(0, len(flat), 50000):
+        d = ((flat[i:i + 50000, None, :] - lab_strip[None]) ** 2).sum(-1)
+        idx[i:i + 50000] = d.argmin(1)
+    return temps[idx].reshape(h, w)
+
+
+def roi_temperature_stats(tmap, line, search=4):
+    """Max/min along a measurement line (x1, y1, x2, y2) in pixels.
+
+    At each step along the line the peak within +-search px across it is taken,
+    so the thin wire is followed even if the line is a few pixels off, and the
+    cold background beside the wire never counts. Returns (min, max) or (None, None).
+    """
+    h, w = tmap.shape
+    x1, y1, x2, y2 = [float(v) for v in line]
+    length = float(np.hypot(x2 - x1, y2 - y1))
+    if length < 3:
+        return None, None
+    ux, uy = (x2 - x1) / length, (y2 - y1) / length
+    nx, ny = -uy, ux
+    peaks = []
+    for s_ in np.arange(0.0, length + 1.0, 1.0):
+        cx, cy = x1 + ux * s_, y1 + uy * s_
+        best = None
+        for k in range(-search, search + 1):
+            px, py = int(round(cx + nx * k)), int(round(cy + ny * k))
+            if 0 <= px < w and 0 <= py < h:
+                v = tmap[py, px]
+                if best is None or v > best:
+                    best = v
+        if best is not None:
+            peaks.append(best)
+    if not peaks:
+        return None, None
+    return float(min(peaks)), float(max(peaks))
+
+
+@st.cache_data(show_spinner=False)
+def cached_temperature_map(image_bytes, t_min, t_max):
+    rgb = np.array(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+    return temperature_map_from_scale(rgb, float(t_min), float(t_max))
 
 
 # ============================================================
@@ -1981,6 +1915,13 @@ elif page == "Thermal Analysis Studio":
         )
 
         manual_entries = {}
+        roi_entries = {}
+        validation_mode = st.checkbox(
+            "Validation mode: ignore stored O&M values and measure from the "
+            "image (shows the difference from O&M)",
+            value=False,
+            key="validation_mode"
+        )
         section_heading(
             "Station / Section & OHE Mast Selection",
             "Choose Station/Section and OHE Mast from the GPS master dropdowns, "
@@ -2060,6 +2001,68 @@ elif page == "Thermal Analysis Studio":
                     "mast": manual_mast.strip()
                 }
 
+                st.markdown("**Measurement line (draw it along the hot wire / joint)**")
+                try:
+                    _rgb = np.array(
+                        Image.open(io.BytesIO(uploaded_file.getvalue())).convert("RGB")
+                    )
+                    _H, _W = _rgb.shape[:2]
+                except Exception:
+                    _rgb = None
+
+                if _rgb is not None:
+                    _lo, _hi = read_scale_labels(_rgb)
+                    _c1, _c2 = st.columns(2)
+                    t_min = _c1.number_input(
+                        "Colour-bar bottom (min) °C",
+                        value=float(_lo) if _lo is not None else 0.0,
+                        step=0.1, format="%.1f", key=f"scale_min_{file_key}"
+                    )
+                    t_max = _c2.number_input(
+                        "Colour-bar top (max) °C",
+                        value=float(_hi) if _hi is not None else 0.0,
+                        step=0.1, format="%.1f", key=f"scale_max_{file_key}"
+                    )
+                    if _lo is None or _hi is None:
+                        st.warning(
+                            "Colour-bar labels were not fully read. Please type "
+                            "the two values shown on the image."
+                        )
+
+                    _s1, _s2 = st.columns(2)
+                    _sx = _s1.slider("Start x", 0, _W - 1, int(_W * 0.35), key=f"line_sx_{file_key}")
+                    _sy = _s2.slider("Start y", 0, _H - 1, int(_H * 0.40), key=f"line_sy_{file_key}")
+                    _e1, _e2 = st.columns(2)
+                    _ex = _e1.slider("End x", 0, _W - 1, int(_W * 0.45), key=f"line_ex_{file_key}")
+                    _ey = _e2.slider("End y", 0, _H - 1, int(_H * 0.40), key=f"line_ey_{file_key}")
+                    _box = (_sx, _sy, _ex, _ey)
+
+                    _preview = _rgb.copy()
+                    cv2.line(
+                        _preview, (_box[0], _box[1]), (_box[2], _box[3]),
+                        (0, 255, 0), 1
+                    )
+                    st.image(_preview, caption="Green line = measured path",
+                             use_container_width=True)
+
+                    if t_max > t_min and np.hypot(_box[2] - _box[0], _box[3] - _box[1]) >= 5:
+                        try:
+                            _tmap = cached_temperature_map(
+                                uploaded_file.getvalue(), t_min, t_max
+                            )
+                            _bmin, _bmax = roi_temperature_stats(_tmap, _box)
+                            st.info(
+                                f"Along the line: max {_bmax:.1f} °C, "
+                                f"min {_bmin:.1f} °C, difference {_bmax - _bmin:.1f} °C"
+                            )
+                            roi_entries[fname] = {
+                                "box": _box, "t_min": float(t_min), "t_max": float(t_max)
+                            }
+                        except Exception as _exc:
+                            st.warning(f"Could not read temperatures: {_exc}")
+                    else:
+                        st.warning("Check the colour-bar values and make the line at least 5 px long.")
+
         if st.button(
             "Analyse Images & Save Records",
             type="primary",
@@ -2074,6 +2077,7 @@ elif page == "Thermal Analysis Studio":
                 )
 
             else:
+                model = train_calibration_model()
                 progress = st.progress(0)
                 status_text = st.empty()
 
@@ -2127,25 +2131,45 @@ elif page == "Thermal Analysis Studio":
                         if manual_values.get("mast"):
                             mast_number = manual_values["mast"]
 
-                        # New methodology: measure only detected OHE wire/component
-                        # pixels and map their colours through this image's own scale.
-                        # OEM records and OCR scale endpoints are NOT used as wire readings.
-                        (
-                            minimum_temperature,
-                            maximum_temperature,
-                            mean_temperature,
-                            temperature_source
-                        ) = analyze_wire_temperatures(image)
+                        stem_key = os.path.splitext(filename)[0]
+                        oem = (
+                            OEM_DATA.get(image_id)
+                            or OEM_DATA.get(stem_key)
+                        )
 
-                        if (
-                            minimum_temperature is None
-                            or maximum_temperature is None
-                            or mean_temperature is None
-                        ):
-                            raise ValueError(temperature_source)
+                        if oem and not validation_mode:
+                            maximum_temperature = float(oem["max"])
+                            minimum_temperature = float(oem["min"])
+                            temperature_source = "OEM reference data"
+
+                        else:
+                            roi = roi_entries.get(filename)
+                            if roi is None:
+                                raise ValueError(
+                                    "Set the colour-bar range and the measurement "
+                                    "line for this image."
+                                )
+                            tmap_roi = temperature_map_from_scale(
+                                np.array(image), roi["t_min"], roi["t_max"]
+                            )
+                            (
+                                minimum_temperature,
+                                maximum_temperature
+                            ) = roi_temperature_stats(tmap_roi, roi["box"])
+                            if minimum_temperature is None:
+                                raise ValueError("The measurement line is empty.")
+                            minimum_temperature = round(minimum_temperature, 2)
+                            maximum_temperature = round(maximum_temperature, 2)
+                            temperature_source = (
+                                "Operator measurement line (colour-bar calibrated)"
+                            )
 
                         difference = round(
                             maximum_temperature - minimum_temperature, 3
+                        )
+
+                        mean_temperature = round(
+                            (maximum_temperature + minimum_temperature) / 2.0, 3
                         )
 
                         fault_status, recommendation = get_decision(
@@ -2181,6 +2205,15 @@ elif page == "Thermal Analysis Studio":
                             "Recommendation": recommendation,
                             "_image_bytes": image_bytes
                         })
+                        if validation_mode and oem:
+                            batch_results[-1]["O&M Max °C"] = float(oem["max"])
+                            batch_results[-1]["O&M Min °C"] = float(oem["min"])
+                            batch_results[-1]["Max error °C"] = round(
+                                maximum_temperature - float(oem["max"]), 2
+                            )
+                            batch_results[-1]["Min error °C"] = round(
+                                minimum_temperature - float(oem["min"]), 2
+                            )
 
                     except Exception as exc:
                         manual_values = manual_entries.get(filename, {})
