@@ -19,7 +19,8 @@ import numpy as np
 import streamlit as st
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-from thermal_core import analyze_thermal_image, point_temperature
+from thermal_core import (analyze_thermal_image, analyze_with_manual_bar,
+                          point_temperature)
 
 DISPLAY_WIDTH = 700
 RADIUS = 6  # pixels around the click that are examined
@@ -28,7 +29,8 @@ RADIUS = 6  # pixels around the click that are examined
 def render_point_picker(pil_image, file_key):
     ss = st.session_state
     k = f"pp_{file_key}"
-    ss.setdefault(k, {"max": None, "minA": None, "minB": None, "last": None})
+    ss.setdefault(k, {"max": None, "minA": None, "minB": None,
+                      "barTop": None, "barBot": None, "last": None})
     pts = ss[k]
 
     # Temperature map is computed once per image
@@ -38,23 +40,33 @@ def render_point_picker(pil_image, file_key):
     res = ss[f"{k}_res"]
     tmap = res.get("_tmap")
 
-    if tmap is None:
-        st.error(
-            "Could not read the colour scale from this image, so point "
-            "temperatures are unavailable. " + " ".join(res["warnings"])
+    manual = tmap is None
+    if manual:
+        st.warning(
+            "The colour bar was not detected automatically. Enter the "
+            "scale limits shown on the image, then click the middle of "
+            "the colour bar at its TOP end and BOTTOM end."
         )
-        return None
-    for w in res["warnings"]:
-        st.warning(w)
+        m1, m2 = st.columns(2)
+        txt_max = m1.text_input("Scale top (max) °C", key=f"{k}_smax")
+        txt_min = m2.text_input("Scale bottom (min) °C", key=f"{k}_smin")
+        try:
+            sc_max, sc_min = float(txt_max), float(txt_min)
+        except ValueError:
+            sc_max = sc_min = None
 
-    st.caption(
-        f"Scale read: {res['min']} to {res['max']} °C "
-        f"({res['source']})"
-    )
+    if not manual:
+        for w in res["warnings"]:
+            st.warning(w)
+        st.caption(
+            f"Scale read: {res['min']} to {res['max']} °C "
+            f"({res['source']})"
+        )
 
     target = st.radio(
         "Click on the image to set:",
-        ["Maximum point", "Minimum point A", "Minimum point B (optional)"],
+        ["Maximum point", "Minimum point A", "Minimum point B (optional)"]
+        + (["Scale bar TOP", "Scale bar BOTTOM"] if manual else []),
         horizontal=True,
         key=f"{k}_target",
     )
@@ -62,6 +74,8 @@ def render_point_picker(pil_image, file_key):
         "Maximum point": "max",
         "Minimum point A": "minA",
         "Minimum point B (optional)": "minB",
+        "Scale bar TOP": "barTop",
+        "Scale bar BOTTOM": "barBot",
     }[target]
 
     # Draw markers on a copy, at display size
@@ -70,8 +84,10 @@ def render_point_picker(pil_image, file_key):
     scale = DISPLAY_WIDTH / W
     disp = cv2.resize(rgb, (DISPLAY_WIDTH, int(H * scale)))
     colours = {"max": (255, 40, 40), "minA": (40, 160, 255),
-               "minB": (40, 255, 160)}
-    labels = {"max": "MAX", "minA": "MIN A", "minB": "MIN B"}
+               "minB": (40, 255, 160),
+               "barTop": (255, 220, 0), "barBot": (255, 220, 0)}
+    labels = {"max": "MAX", "minA": "MIN A", "minB": "MIN B",
+              "barTop": "BAR TOP", "barBot": "BAR BOTTOM"}
     for name, p in pts.items():
         if name == "last" or p is None:
             continue
@@ -93,8 +109,25 @@ def render_point_picker(pil_image, file_key):
 
     col1, col2 = st.columns(2)
     if col2.button("Clear points", key=f"{k}_clear"):
-        ss[k] = {"max": None, "minA": None, "minB": None, "last": None}
+        ss[k] = {"max": None, "minA": None, "minB": None,
+                 "barTop": None, "barBot": None, "last": None}
         st.rerun()
+
+    if manual:
+        if sc_max is None or pts["barTop"] is None or pts["barBot"] is None:
+            st.info("Enter scale limits and click the bar TOP and BOTTOM.")
+            return None
+        ck = (pts["barTop"], pts["barBot"], sc_max, sc_min)
+        if ss.get(f"{k}_mkey") != ck:
+            ss[f"{k}_mkey"] = ck
+            ss[f"{k}_mres"] = analyze_with_manual_bar(
+                pil_image, pts["barTop"], pts["barBot"], sc_max, sc_min
+            )
+        mres = ss.get(f"{k}_mres")
+        if not mres:
+            st.error("Bar points or scale limits are not valid.")
+            return None
+        tmap = mres["_tmap"]
 
     if pts["max"] is None or pts["minA"] is None:
         st.info("Select a Maximum point and at least Minimum point A.")
