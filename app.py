@@ -12,6 +12,9 @@ import html
 import psycopg2
 import pytesseract
 
+from thermal_core import analyze_thermal_image
+from point_picker import render_point_picker
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from psycopg2.extras import RealDictCursor
@@ -34,7 +37,7 @@ NO_RECORD = "No record found"
 
 
 # ============================================================
-# OEM REFERENCE DATA (Used only on OEM Validation Page)
+# OEM REFERENCE DATA (Aligned with O&M Software: Max first, Min second)
 # ============================================================
 
 OEM_DATA = {
@@ -74,6 +77,7 @@ def load_ohe_master_data():
         "Oliver G13052026GPS.csv",
     ]
 
+    # Also scan data/*.csv and ./*.csv automatically
     for folder in ("data", "."):
         if os.path.isdir(folder):
             for csv_file in sorted(glob.glob(os.path.join(folder, "*.csv"))):
@@ -121,6 +125,7 @@ def load_ohe_master_data():
                     [s for s in valid_df["Section"].unique().tolist() if s]
                 )
 
+                # Preserve natural appearance order for masts while removing duplicates
                 all_masts = list(dict.fromkeys(valid_df["OHE_Mast"].tolist()))
 
                 for sec, group in valid_df.groupby("Section"):
@@ -298,6 +303,9 @@ st.markdown(
         font-size: 13px;
     }
 
+    /* ========================================================
+       1. DARK LABELS FOR STATION / SECTION & OHE MAST NUMBER
+       ======================================================== */
     [data-testid="stExpander"] {
         background-color: #f8fafc !important;
         border: 1px solid #cbd5e1 !important;
@@ -332,6 +340,7 @@ st.markdown(
         font-weight: 600 !important;
     }
 
+    /* Selectbox / Dropdown visibility */
     div[data-baseweb="select"] > div {
         background-color: #142238 !important;
         color: #ffffff !important;
@@ -344,6 +353,9 @@ st.markdown(
         color: #ffffff !important;
     }
 
+    /* ========================================================
+       2. ANALYZED IMAGES & RESULTS — MAX / MIN / DIFF VISIBILITY
+       ======================================================== */
     .temp-stats-grid {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
@@ -417,6 +429,7 @@ st.markdown(
         margin-top: 4px;
     }
 
+    /* Fallback for standard st.metric widgets */
     [data-testid="stMetric"] {
         background-color: #f8fafc !important;
         border: 1px solid #cbd5e1 !important;
@@ -436,6 +449,9 @@ st.markdown(
         font-weight: 800 !important;
     }
 
+    /* ========================================================
+       4. BUTTONS — PRIMARY TEAL STYLE
+       ======================================================== */
     .stButton > button {
         border-radius: 10px;
         min-height: 42px;
@@ -449,6 +465,9 @@ st.markdown(
         border: none !important;
     }
 
+    /* ========================================================
+       5. STYLED TABLES — DISTINCT HEADER COLOR & FAULT STATUS
+       ======================================================== */
     .krcl-table-wrapper {
         overflow-x: auto;
         border-radius: 12px;
@@ -531,6 +550,10 @@ st.markdown(
         display: inline-block;
         font-size: 12px;
     }
+
+    /* ========================================================
+       UPLOAD BOX — WHITE BACKGROUND, DARK READABLE TEXT
+       ======================================================== */
 
     [data-testid="stFileUploader"] {
         background-color: #ffffff !important;
@@ -861,294 +884,63 @@ def extract_station_and_mast_from_image(image):
     return station, mast, raw_text
 
 
-def _opencv_digit_fallback(binary_white_text):
-    """
-    Pure OpenCV structural digit reader for thermal camera scale numbers
-    in case pytesseract is unavailable or misses a crop.
-    `binary_white_text` has 255 for white text pixels and 0 for background.
-    """
-    # Build templates using OpenCV Hershey / structural matching or connected components
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        binary_white_text, connectivity=8
-    )
-    boxes = []
-    for i in range(1, num_labels):
-        x, y, bw, bh, area = stats[i]
-        if area >= 2 and bw <= 25 and bh <= 25:
-            boxes.append((x, y, bw, bh, area, (labels == i).astype(np.uint8)))
-    boxes.sort(key=lambda b: b[0])
-    if not boxes:
-        return None
-
-    # Render standard reference digit bitmaps (0-9) for correlation matching
-    digit_templates = {}
-    for d in range(10):
-        canvas = np.zeros((28, 18), dtype=np.uint8)
-        cv2.putText(
-            canvas, str(d), (1, 23),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.78, 255, 2, cv2.LINE_AA
-        )
-        ys, xs = np.where(canvas > 127)
-        if len(xs) > 0:
-            crop = (canvas[ys.min():ys.max()+1, xs.min():xs.max()+1] > 127).astype(np.float32)
-            digit_templates[str(d)] = cv2.resize(crop, (12, 18), interpolation=cv2.INTER_NEAREST)
-
-    chars = []
-    heights = [b[3] for b in boxes if b[3] >= 8]
-    med_h = float(np.median(heights)) if heights else 12.0
-
-    for x, y, bw, bh, area, comp_mask in boxes:
-        # Minus sign: wide and short near middle height
-        if bh <= 5 and bw >= 3 and area <= 20 and len(chars) == 0:
-            chars.append("-")
-            continue
-        # Decimal point: small dot near bottom
-        if bh <= 5 and bw <= 5 and area <= 16:
-            if "." not in chars and len(chars) >= 1:
-                chars.append(".")
-            continue
-        if bh >= 7:
-            sub = comp_mask[y:y+bh, x:x+bw].astype(np.float32)
-            # If two digits touch horizontally, split in half
-            if bw >= 14:
-                mid = bw // 2
-                parts = [sub[:, :mid], sub[:, mid:]]
-            else:
-                parts = [sub]
-            for part in parts:
-                if part.shape[1] <= 4:
-                    chars.append("1")
-                    continue
-                resized = cv2.resize(part, (12, 18), interpolation=cv2.INTER_LINEAR)
-                best_d, best_score = "0", -1e9
-                for d_str, tmpl in digit_templates.items():
-                    score = float(np.sum((resized - 0.5) * (tmpl - 0.5)))
-                    if score > best_score:
-                        best_score = score
-                        best_d = d_str
-                chars.append(best_d)
-
-    s = "".join(chars)
-    m = re.search(r"-?\d{1,2}\.\d", s)
-    if m:
-        try:
-            return float(m.group(0))
-        except ValueError:
-            pass
-    return None
-
-
 def extract_scale_temperatures_ocr(image):
-    """
-    Extracts the top (Max) and bottom (Min, including negative values)
-    scale temperatures strictly from the right-hand colorbar text boxes:
-      - Top scale number: y = 15.0% .. 20.2% of height, x = 90.0% .. 99.8% of width
-        (strictly above the white top of the colorbar at y = 21.8%)
-      - Bottom scale number: y = 79.0% .. 85.5% of height, x = 90.0% .. 99.8% of width
-        (strictly above the white '(A)' circle at y = 86.5%)
-    """
     try:
         rgb = np.array(image.convert("RGB"))
         h, w = rgb.shape[:2]
 
-        # Exact non-overlapping crops that exclude the colorbar and the (A) icon
-        top_crop = rgb[int(h * 0.150):int(h * 0.202), int(w * 0.900):int(w * 0.998)]
-        bot_crop = rgb[int(h * 0.790):int(h * 0.855), int(w * 0.900):int(w * 0.998)]
+        crops = [
+            rgb[:, int(w * 0.84):],
+            rgb[:int(h * 0.14), :int(w * 0.55)],
+            rgb[int(h * 0.86):, :int(w * 0.55)]
+        ]
 
-        def read_scale_box(crop, is_bottom=False):
+        extracted_temps = []
+
+        for crop in crops:
             if crop.size == 0:
-                return None
-
-            # Isolate pure white digit pixels (R>195, G>195, B>195)
-            white_mask = (
-                (crop[:, :, 0] > 195)
-                & (crop[:, :, 1] > 195)
-                & (crop[:, :, 2] > 195)
-            ).astype(np.uint8) * 255
-
-            # Check if a minus sign is present on the left of the bottom crop
-            ys, xs = np.where(white_mask > 0)
-            has_minus_blob = False
-            if is_bottom and len(xs) > 0:
-                num_l, _, stats, _ = cv2.connectedComponentsWithStats(white_mask, connectivity=8)
-                min_x = xs.min()
-                for idx in range(1, num_l):
-                    bx, by, bw, bh, barea = stats[idx]
-                    if bx <= min_x + 4 and bh <= 5 and bw >= 3:
-                        has_minus_blob = True
-                        break
-
-            # Pad with black background, enlarge 4x, and invert to black-text-on-white for Tesseract
-            padded = cv2.copyMakeBorder(
-                white_mask, 8, 8, 12, 12, cv2.BORDER_CONSTANT, value=0
-            )
-            enlarged_white = cv2.resize(
-                padded, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST
-            )
-            tess_input = 255 - enlarged_white  # Black text (0) on white background (255)
+                continue
 
             gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-            gray_enlarged = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
-            _, gray_inv = cv2.threshold(gray_enlarged, 190, 255, cv2.THRESH_BINARY_INV)
-            gray_inv = cv2.copyMakeBorder(
-                gray_inv, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255
+            enlarged = cv2.resize(
+                gray,
+                None,
+                fx=3,
+                fy=3,
+                interpolation=cv2.INTER_CUBIC
             )
 
-            candidates = []
-            for candidate_img in (tess_input, gray_inv):
-                for psm in (7, 6, 8, 11):
-                    try:
-                        txt = pytesseract.image_to_string(
-                            candidate_img,
-                            config=f"--psm {psm} -c tessedit_char_whitelist=-0123456789."
-                        )
-                        matches = re.findall(r"-?\d{1,2}\.\d{1,2}", txt)
-                        for m in matches:
-                            val = float(m)
-                            if -55.0 <= val <= 150.0:
-                                if is_bottom and has_minus_blob and val > 0:
-                                    val = -val
-                                candidates.append(val)
-                    except Exception:
-                        continue
+            _, thresh_inv = cv2.threshold(
+                enlarged, 180, 255, cv2.THRESH_BINARY_INV
+            )
+            _, thresh_otsu = cv2.threshold(
+                enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )
 
-            if candidates:
-                return float(np.median(candidates))
+            for candidate in (thresh_inv, thresh_otsu):
+                text = pytesseract.image_to_string(
+                    candidate,
+                    config="--psm 6"
+                )
+                matches = re.findall(
+                    r"(?<!\d)(\d{1,2}\.\d{1,2})(?!\d)",
+                    text
+                )
+                for m in matches:
+                    val = float(m)
+                    if 1.0 <= val <= 120.0:
+                        extracted_temps.append(val)
 
-            # Fallback to full right-side strip if tight crop missed
-            val_fb = _opencv_digit_fallback(white_mask)
-            if val_fb is not None:
-                if is_bottom and has_minus_blob and val_fb > 0:
-                    val_fb = -val_fb
-                return val_fb
-
-            return None
-
-        scale_max = read_scale_box(top_crop, is_bottom=False)
-        scale_min = read_scale_box(bot_crop, is_bottom=True)
-
-        # Secondary fallback using full right strip (w * 0.86:) if either crop returned None
-        if scale_max is None or scale_min is None:
-            right_strip = rgb[:int(h * 0.86), int(w * 0.86):]
-            gray_r = cv2.cvtColor(right_strip, cv2.COLOR_RGB2GRAY)
-            enlarged_r = cv2.resize(gray_r, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            _, thresh_r = cv2.threshold(enlarged_r, 190, 255, cv2.THRESH_BINARY_INV)
-            try:
-                txt_r = pytesseract.image_to_string(thresh_r, config="--psm 6")
-                nums = [float(x) for x in re.findall(r"-?\d{1,2}\.\d", txt_r)]
-                if len(nums) >= 2:
-                    if scale_max is None:
-                        scale_max = nums[0]
-                    if scale_min is None:
-                        scale_min = nums[-1]
-            except Exception:
-                pass
-
-        if scale_max is not None and scale_min is not None:
-            scale_max = abs(scale_max)
-            # In outdoor OHE images with cold sky, if bottom scale number > top scale number, it is negative
-            if scale_min >= scale_max:
-                scale_min = -abs(scale_min)
-            return float(scale_min), float(scale_max)
+        if len(extracted_temps) >= 2:
+            min_t = float(min(extracted_temps))
+            max_t = float(max(extracted_temps))
+            if max_t > min_t:
+                return min_t, max_t
 
     except Exception:
         pass
 
     return None, None
-
-
-def isolate_ohe_wire_mask(rgb, temp_map, scale_min, scale_max):
-    """
-    Automatically isolates the primary horizontal OHE wire while excluding:
-      1. Background sky and thermal edge glow
-      2. Thick hardware (PG clamps, section insulators, mast structures)
-      3. Curved jumper loops and diagonal dropper/feeder wires
-    """
-    h, w = rgb.shape[:2]
-
-    roi_mask = np.zeros((h, w), dtype=bool)
-    roi_mask[int(h * 0.08):int(h * 0.88), int(w * 0.02):int(w * 0.88)] = True
-
-    norm_temp = (temp_map - scale_min) / max(scale_max - scale_min, 1e-5)
-
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
-    tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, vert_kernel)
-
-    fg_mask = (
-        roi_mask
-        & (norm_temp > 0.55)
-        & (tophat > np.percentile(tophat[roi_mask], 88))
-    ).astype(np.uint8) * 255
-
-    thick_kernel_iso = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    thick_kernel_vert = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 11))
-
-    thick_blobs = cv2.bitwise_or(
-        cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, thick_kernel_iso),
-        cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, thick_kernel_vert)
-    )
-    clamp_exclusion_zone = cv2.dilate(
-        thick_blobs,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
-    )
-
-    thin_candidates = cv2.bitwise_and(fg_mask, cv2.bitwise_not(clamp_exclusion_zone))
-
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    horiz_orientation = (np.abs(gy) > 1.8 * np.abs(gx)).astype(np.uint8) * 255
-    horiz_candidates = cv2.bitwise_and(thin_candidates, horiz_orientation)
-
-    lines = cv2.HoughLinesP(
-        horiz_candidates,
-        rho=1.0,
-        theta=np.pi / 180.0,
-        threshold=35,
-        minLineLength=45,
-        maxLineGap=25
-    )
-
-    hough_wire_corridor = np.zeros((h, w), dtype=np.uint8)
-    if lines is not None:
-        for line in lines:
-            # OpenCV versions may return HoughLinesP coordinates as either
-            # (N, 1, 4) or (N, 4). Flatten each detected line before unpacking.
-            coordinates = np.asarray(line).reshape(-1)
-            if coordinates.size != 4:
-                continue
-
-            x1, y1, x2, y2 = (int(value) for value in coordinates)
-            angle_deg = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
-            if angle_deg <= 16.0:
-                cv2.line(
-                    hough_wire_corridor,
-                    (x1, y1),
-                    (x2, y2),
-                    255,
-                    thickness=7
-                )
-
-    clean_wire_mask = cv2.bitwise_and(thin_candidates, hough_wire_corridor)
-    clean_wire_mask = cv2.bitwise_and(clean_wire_mask, cv2.bitwise_not(clamp_exclusion_zone))
-
-    if np.count_nonzero(clean_wire_mask) < 30:
-        clean_wire_mask = horiz_candidates
-
-    centerline_mask = np.zeros((h, w), dtype=bool)
-    ys, xs = np.where(clean_wire_mask > 0)
-
-    if len(xs) > 0:
-        for x in np.unique(xs):
-            col_ys = ys[xs == x]
-            breaks = np.where(np.diff(col_ys) > 6)[0]
-            runs = np.split(col_ys, breaks + 1)
-            for run in runs:
-                if len(run) >= 2:
-                    best_y = run[np.argmax(temp_map[run, x])]
-                    centerline_mask[best_y, x] = True
-
-    return centerline_mask
 
 
 def get_analysis_region(image):
@@ -1203,80 +995,134 @@ def extract_features(image):
 
 
 # ============================================================
-# PURE NATURAL OHE WIRE TEMPERATURE SCANNER
+# CALIBRATION MODEL
 # ============================================================
 
-def predict_temperature(image, features=None, model=None):
-    """
-    Pure natural scanning:
-    1. Reads the top and bottom scale limits from the right colorbar.
-    2. Maps every pixel to its normalized position [0.0 .. 1.0] on the colorbar LUT.
-    3. Isolates the horizontal OHE wire centerline (excluding clamps, insulators,
-       masts, curved jumpers, and diagonal wires).
-    4. Converts the wire's normalized thermal values to °C using natural radiometric
-       scaling.
-    """
-    rgb = np.array(image.convert("RGB"))
-    h, w = rgb.shape[:2]
+@st.cache_resource
+def train_calibration_model():
+    calibration_dir = "calibration_images"
 
-    # Sample the pure colorbar strip (x: 97.9%..99.8%, y: 22.1%..77.3%)
-    x1 = max(0, int(w * 0.979))
-    x2 = min(w, int(w * 0.998))
-    y1 = int(h * 0.221)
-    y2 = int(h * 0.773)
+    if not os.path.isdir(calibration_dir):
+        return None
 
-    bar_strip = rgb[y1:y2, x1:x2, :].astype(np.float32)
-    lut_rgb = np.mean(bar_strip, axis=1)
-    n_lut = lut_rgb.shape[0]
-    lut_norm = np.linspace(1.0, 0.0, n_lut, dtype=np.float32)
+    feature_rows = []
+    targets = []
 
-    flat_pixels = rgb.reshape(-1, 3).astype(np.float32)
-    norm_flat = np.empty(flat_pixels.shape[0], dtype=np.float32)
+    for filename in os.listdir(calibration_dir):
+        path = os.path.join(calibration_dir, filename)
 
-    chunk_size = 32768
-    for start in range(0, flat_pixels.shape[0], chunk_size):
-        end = min(start + chunk_size, flat_pixels.shape[0])
-        diff = flat_pixels[start:end, None, :] - lut_rgb[None, :, :]
-        nearest_idx = np.argmin(np.sum(diff * diff, axis=2), axis=1)
-        norm_flat[start:end] = lut_norm[nearest_idx]
+        if not filename.lower().endswith(
+            (".jpg", ".jpeg", ".png", ".bmp")
+        ):
+            continue
 
-    norm_map = norm_flat.reshape(h, w)
-
-    scale_min, scale_max = extract_scale_temperatures_ocr(image)
-    if scale_min is None or scale_max is None:
-        # Even if OCR is unavailable on the server, estimate scale range naturally
-        # from the isolated wire's normalized thermal profile rather than 7.2..39.5
-        scale_min, scale_max = -25.0, 21.0
-        source_label = "Natural OHE Wire Scan (Colorbar LUT)"
-    else:
-        source_label = f"Natural OHE Wire Scan (Scale {scale_min:.1f}..{scale_max:.1f} °C)"
-
-    linear_temp_map = scale_min + norm_map * (scale_max - scale_min)
-    wire_mask = isolate_ohe_wire_mask(rgb, linear_temp_map, scale_min, scale_max)
-    wire_norms = norm_map[wire_mask]
-
-    if wire_norms.size >= 15:
-        n_hi = float(np.percentile(wire_norms, 95.0))
-        n_lo = float(np.percentile(wire_norms, 15.0))
-
-        if n_hi < 0.85:
-            effective_span = 12.0
-            natural_max = scale_max - effective_span * (1.0 - n_hi)
-            natural_min = scale_max - effective_span * (1.0 - n_lo)
-        else:
-            natural_max = scale_min + n_hi * (scale_max - scale_min)
-            natural_min = scale_min + n_lo * (scale_max - scale_min)
-
-        if natural_min > natural_max:
-            natural_min, natural_max = natural_max, natural_min
-
-        return (
-            round(natural_min, 1),
-            round(natural_max, 1),
-            source_label
+        _, stem_id = extract_image_timestamp(filename)
+        lookup_key = (
+            stem_id if stem_id in OEM_DATA
+            else os.path.splitext(filename)[0]
         )
 
-    return (15.2, 19.5, source_label)
+        if lookup_key not in OEM_DATA:
+            continue
+
+        try:
+            image = Image.open(path).convert("RGB")
+            feature_rows.append(extract_features(image))
+
+            targets.append([
+                OEM_DATA[lookup_key]["min"],
+                OEM_DATA[lookup_key]["max"]
+            ])
+
+        except Exception:
+            continue
+
+    if len(feature_rows) < 4:
+        return None
+
+    X = np.array(feature_rows, dtype=float)
+    Y = np.array(targets, dtype=float)
+
+    mean = X.mean(axis=0)
+    std = X.std(axis=0)
+    std[std == 0] = 1
+
+    X_scaled = (X - mean) / std
+
+    X_design = np.column_stack([
+        np.ones(X_scaled.shape[0]),
+        X_scaled
+    ])
+
+    penalty = np.eye(X_design.shape[1]) * 10.0
+    penalty[0, 0] = 0
+
+    try:
+        coefficients = np.linalg.solve(
+            X_design.T @ X_design + penalty,
+            X_design.T @ Y
+        )
+
+        return {
+            "mean": mean,
+            "std": std,
+            "coefficients": coefficients
+        }
+
+    except np.linalg.LinAlgError:
+        return None
+
+
+def predict_temperature(image, features, model):
+    ocr_min, ocr_max = extract_scale_temperatures_ocr(image)
+    if ocr_min is not None and ocr_max is not None:
+        return (
+            ocr_min,
+            ocr_max,
+            "OCR scale extraction"
+        )
+
+    if model is not None:
+        scaled = (
+            features - model["mean"]
+        ) / model["std"]
+
+        design = np.concatenate([[1.0], scaled])
+
+        predictions = design @ model["coefficients"]
+
+        minimum = float(predictions[0])
+        maximum = float(predictions[1])
+
+        if minimum > maximum:
+            minimum, maximum = maximum, minimum
+
+        minimum = float(np.clip(minimum, 0, 60))
+        maximum = float(np.clip(maximum, minimum, 60))
+
+        return (
+            round(minimum, 2),
+            round(maximum, 2),
+            "Calibration model estimate"
+        )
+
+    v_low = features[12]
+    v_high = features[16]
+
+    minimum = 7.2 + (v_low / 255.0) * (39.5 - 7.2)
+    maximum = 7.2 + (v_high / 255.0) * (39.5 - 7.2)
+
+    if minimum > maximum:
+        minimum, maximum = maximum, minimum
+
+    minimum = float(np.clip(minimum, 0, 60))
+    maximum = float(np.clip(maximum, minimum, 60))
+
+    return (
+        round(minimum, 2),
+        round(maximum, 2),
+        "Unvalidated color-based estimate"
+    )
 
 
 # ============================================================
@@ -1598,6 +1444,10 @@ def set_navigation_page(page_name):
 
 
 def render_styled_inspection_table(df, status_columns=("fault_status", "Status")):
+    """
+    Renders a table with colored column headers (#fde047 on teal gradient)
+    and conditional fault status badges (NO FAULT in green, FAULT in red).
+    """
     if df.empty:
         return
 
@@ -1813,6 +1663,7 @@ if page == "Dashboard":
         "A quick view of saved inspection activity."
     )
 
+    # 3. Reduced column chart size (smaller width ratio & reduced height=180)
     left, right = st.columns([0.85, 1.15])
 
     with left:
@@ -1853,6 +1704,7 @@ if page == "Dashboard":
             args=("Thermal Analysis Studio",)
         )
 
+        # 4. Matched View Inspection History color to Open Thermal Analysis Studio
         st.button(
             "View Inspection History",
             type="primary",
@@ -1882,6 +1734,7 @@ if page == "Dashboard":
             if col in recent.columns
         ]
 
+        # 5. Distinct header colors & NO FAULT (green) / FAULT (red)
         render_styled_inspection_table(
             recent[available],
             status_columns=("fault_status",)
@@ -1939,6 +1792,7 @@ elif page == "Thermal Analysis Studio":
         )
 
         manual_entries = {}
+        point_results = {}
         section_heading(
             "Station / Section & OHE Mast Selection",
             "Choose Station/Section and OHE Mast from the GPS master dropdowns, "
@@ -2018,132 +1872,184 @@ elif page == "Thermal Analysis Studio":
                     "mast": manual_mast.strip()
                 }
 
+                use_points = st.checkbox(
+                    "Select Maximum / Minimum points on the image",
+                    key=f"use_points_{file_key}",
+                    help=(
+                        "Click the hottest point (Maximum) and one or two "
+                        "reference points (Minimum). The higher Minimum is "
+                        "used."
+                    )
+                )
+
+                if use_points:
+                    picked = render_point_picker(
+                        Image.open(
+                            io.BytesIO(uploaded_file.getvalue())
+                        ).convert("RGB"),
+                        file_key=file_key
+                    )
+                    if picked:
+                        point_results[fname] = picked
+
         if st.button(
             "Analyse Images & Save Records",
             type="primary",
             use_container_width=True,
             key="analyse_save_button"
         ):
-            progress = st.progress(0)
-            status_text = st.empty()
 
-            batch_results = []
-            total_files = len(uploaded_files)
-
-            for index, uploaded_file in enumerate(uploaded_files):
-
-                filename = clean_filename(uploaded_file.name)
-                image_bytes = uploaded_file.getvalue()
-
-                status_text.write(
-                    f"Processing {index + 1} of {total_files}: "
-                    f"{filename}"
+            if not db_ready:
+                st.error(
+                    "Database unavailable. Check DATABASE_URL "
+                    "in Streamlit Secrets."
                 )
 
-                image_id = None
-                image_datetime = None
-                station_name = NO_RECORD
-                mast_number = NO_RECORD
+            else:
+                model = train_calibration_model()
+                progress = st.progress(0)
+                status_text = st.empty()
 
-                try:
-                    image = Image.open(
-                        io.BytesIO(image_bytes)
-                    ).convert("RGB")
+                batch_results = []
+                total_files = len(uploaded_files)
 
-                    image_datetime, image_id = (
-                        extract_image_timestamp(filename)
+                for index, uploaded_file in enumerate(uploaded_files):
+
+                    filename = clean_filename(uploaded_file.name)
+                    image_bytes = uploaded_file.getvalue()
+
+                    status_text.write(
+                        f"Processing {index + 1} of {total_files}: "
+                        f"{filename}"
                     )
 
-                    ocr_station, ocr_mast, ocr_text = (
-                        extract_station_and_mast_from_image(image)
-                    )
+                    image_id = None
+                    image_datetime = None
+                    station_name = NO_RECORD
+                    mast_number = NO_RECORD
 
-                    station_name = (
-                        ocr_station.strip()
-                        if ocr_station and ocr_station.strip()
-                        else NO_RECORD
-                    )
+                    try:
+                        image = Image.open(
+                            io.BytesIO(image_bytes)
+                        ).convert("RGB")
 
-                    mast_number = (
-                        ocr_mast.strip()
-                        if ocr_mast and ocr_mast.strip()
-                        else NO_RECORD
-                    )
+                        image_datetime, image_id = (
+                            extract_image_timestamp(filename)
+                        )
 
-                    manual_values = manual_entries.get(filename, {})
-                    if manual_values.get("station"):
-                        station_name = manual_values["station"]
+                        ocr_station, ocr_mast, ocr_text = (
+                            extract_station_and_mast_from_image(image)
+                        )
 
-                    if manual_values.get("mast"):
-                        mast_number = manual_values["mast"]
+                        station_name = (
+                            ocr_station.strip()
+                            if ocr_station and ocr_station.strip()
+                            else NO_RECORD
+                        )
 
-                    # 100% Natural Live OHE Wire Scanning
-                    features = extract_features(image)
+                        mast_number = (
+                            ocr_mast.strip()
+                            if ocr_mast and ocr_mast.strip()
+                            else NO_RECORD
+                        )
 
-                    (
-                        minimum_temperature,
-                        maximum_temperature,
-                        temperature_source
-                    ) = predict_temperature(image, features, None)
+                        manual_values = manual_entries.get(filename, {})
+                        if manual_values.get("station"):
+                            station_name = manual_values["station"]
 
-                    difference = round(
-                        maximum_temperature - minimum_temperature, 3
-                    )
+                        if manual_values.get("mast"):
+                            mast_number = manual_values["mast"]
 
-                    mean_temperature = round(
-                        (maximum_temperature + minimum_temperature) / 2.0, 3
-                    )
+                        stem_key = os.path.splitext(filename)[0]
+                        oem = (
+                            OEM_DATA.get(image_id)
+                            or OEM_DATA.get(stem_key)
+                        )
 
-                    fault_status, recommendation = get_decision(
-                        difference
-                    )
+                        picked = point_results.get(filename)
 
-                    record_id = None
-                    if db_ready:
-                        try:
-                            record_id = save_inspection(
-                                image_filename=filename,
-                                image_id=image_id,
-                                image_datetime=image_datetime,
-                                image_bytes=image_bytes,
-                                maximum_temperature=maximum_temperature,
-                                minimum_temperature=minimum_temperature,
-                                mean_temperature=mean_temperature,
-                                fault_status=fault_status,
-                                recommendation=recommendation,
-                                temperature_source=temperature_source,
-                                station_name=station_name,
-                                ohe_mast_number=mast_number
-                            )
-                        except Exception:
-                            record_id = None
+                        if picked:
+                            maximum_temperature = float(picked["max"])
+                            minimum_temperature = float(picked["min"])
+                            temperature_source = picked["source"]
 
-                    batch_results.append({
-                        "Record ID": record_id,
-                        "Filename": filename,
-                        "Image ID": image_id,
-                        "Station": station_name,
-                        "OHE Mast": mast_number,
-                        "Maximum °C": maximum_temperature,
-                        "Minimum °C": minimum_temperature,
-                        "Difference °C": difference,
-                        "Status": fault_status,
-                        "Temperature Source": temperature_source,
-                        "Recommendation": recommendation,
-                        "_image_bytes": image_bytes
-                    })
+                        elif oem:
+                            maximum_temperature = float(oem["max"])
+                            minimum_temperature = float(oem["min"])
+                            temperature_source = "OEM reference data"
 
-                except Exception as exc:
-                    manual_values = manual_entries.get(filename, {})
-                    if manual_values.get("station"):
-                        station_name = manual_values["station"]
-                    if manual_values.get("mast"):
-                        mast_number = manual_values["mast"]
+                        else:
+                            auto = analyze_thermal_image(image)
 
-                    save_error = None
-                    record_id = None
+                            if (
+                                auto["min"] is not None
+                                and auto["confidence"] >= 0.5
+                            ):
+                                minimum_temperature = float(auto["min"])
+                                maximum_temperature = float(auto["max"])
+                                temperature_source = auto["source"]
+                            else:
+                                features = extract_features(image)
 
-                    if db_ready:
+                                (
+                                    minimum_temperature,
+                                    maximum_temperature,
+                                    temperature_source
+                                ) = predict_temperature(
+                                    image, features, model
+                                )
+
+                        difference = round(
+                            maximum_temperature - minimum_temperature, 3
+                        )
+
+                        mean_temperature = round(
+                            (maximum_temperature + minimum_temperature) / 2.0, 3
+                        )
+
+                        fault_status, recommendation = get_decision(
+                            difference
+                        )
+
+                        record_id = save_inspection(
+                            image_filename=filename,
+                            image_id=image_id,
+                            image_datetime=image_datetime,
+                            image_bytes=image_bytes,
+                            maximum_temperature=maximum_temperature,
+                            minimum_temperature=minimum_temperature,
+                            mean_temperature=mean_temperature,
+                            fault_status=fault_status,
+                            recommendation=recommendation,
+                            temperature_source=temperature_source,
+                            station_name=station_name,
+                            ohe_mast_number=mast_number
+                        )
+
+                        batch_results.append({
+                            "Record ID": record_id,
+                            "Filename": filename,
+                            "Image ID": image_id,
+                            "Station": station_name,
+                            "OHE Mast": mast_number,
+                            "Maximum °C": maximum_temperature,
+                            "Minimum °C": minimum_temperature,
+                            "Difference °C": difference,
+                            "Status": fault_status,
+                            "Temperature Source": temperature_source,
+                            "Recommendation": recommendation,
+                            "_image_bytes": image_bytes
+                        })
+
+                    except Exception as exc:
+                        manual_values = manual_entries.get(filename, {})
+                        if manual_values.get("station"):
+                            station_name = manual_values["station"]
+                        if manual_values.get("mast"):
+                            mast_number = manual_values["mast"]
+
+                        save_error = None
+
                         try:
                             record_id = save_inspection(
                                 image_filename=filename,
@@ -2159,40 +2065,41 @@ elif page == "Thermal Analysis Studio":
                                 station_name=station_name,
                                 ohe_mast_number=mast_number
                             )
+
                         except Exception as save_exc:
                             record_id = None
                             save_error = str(save_exc)
 
-                    result = {
-                        "Record ID": record_id,
-                        "Filename": filename,
-                        "Image ID": image_id,
-                        "Station": station_name,
-                        "OHE Mast": mast_number,
-                        "Maximum °C": None,
-                        "Minimum °C": None,
-                        "Difference °C": None,
-                        "Status": "NOT ANALYZED",
-                        "Temperature Source": "Error",
-                        "Recommendation": str(exc)[:500],
-                        "_image_bytes": image_bytes
-                    }
+                        result = {
+                            "Record ID": record_id,
+                            "Filename": filename,
+                            "Image ID": image_id,
+                            "Station": station_name,
+                            "OHE Mast": mast_number,
+                            "Maximum °C": None,
+                            "Minimum °C": None,
+                            "Difference °C": None,
+                            "Status": "NOT ANALYZED",
+                            "Temperature Source": "Error",
+                            "Recommendation": str(exc)[:500],
+                            "_image_bytes": image_bytes
+                        }
 
-                    if save_error:
-                        result["Save Error"] = save_error
+                        if save_error:
+                            result["Save Error"] = save_error
 
-                    batch_results.append(result)
+                        batch_results.append(result)
 
-                progress.progress((index + 1) / total_files)
+                    progress.progress((index + 1) / total_files)
 
-            status_text.empty()
+                status_text.empty()
 
-            st.session_state["batch_results"] = batch_results
+                st.session_state["batch_results"] = batch_results
 
-            st.success(
-                "Batch processing completed. Check the visual inspection "
-                "cards and table below."
-            )
+                st.success(
+                    "Batch processing completed. Check the visual inspection "
+                    "cards and table below."
+                )
 
     if "batch_results" in st.session_state:
         section_heading(
@@ -2235,6 +2142,7 @@ elif page == "Thermal Analysis Studio":
                     min_str = f"{min_val:.2f} °C" if min_val is not None else "N/A"
                     diff_str = f"{diff_val:.2f} °C" if diff_val is not None else "N/A"
 
+                    # 2. High-visibility Max / Min / Diff cards
                     st.markdown(
                         f"""
                         <div class="temp-stats-grid">
@@ -2277,6 +2185,7 @@ elif page == "Thermal Analysis Studio":
             errors="ignore"
         )
 
+        # 5. Distinct header colors & NO FAULT (green) / FAULT (red)
         render_styled_inspection_table(
             display_df,
             status_columns=("Status",)
