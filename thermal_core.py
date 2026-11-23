@@ -46,7 +46,7 @@ def find_colorbar(rgb):
 
     span = np.linalg.norm(lab.max(axis=0) - lab.min(axis=0), axis=1)  # (w',)
     hu = np.full(wp, 99.0, dtype=np.float32)
-    shift = 3
+    shift = 2
     hu[:wp - shift] = np.linalg.norm(
         lab[:, :wp - shift] - lab[:, shift:], axis=2
     ).mean(axis=0)
@@ -54,25 +54,25 @@ def find_colorbar(rgb):
     vstep_all = np.linalg.norm(np.diff(lab, axis=0), axis=2)   # (h-1, w')
     active = (vstep_all > 0.5).sum(axis=0)                     # rows changing
 
-    ok = (span > 100) & (hu < 6) & (active > h * 0.2)
+    ok = (span > 45) & (hu < 6) & (active > h * 0.12)
     cols = np.where(ok)[0]
     if cols.size < 4:
         return None
 
     runs = np.split(cols, np.where(np.diff(cols) > 2)[0] + 1)
     run = max(runs, key=len)
-    if len(run) < 6 or len(run) > w * 0.12:
+    if len(run) < 4 or len(run) > w * 0.12:
         return None
 
     x1, x2 = int(run[0] + x_start), int(run[-1] + x_start)
     mid = lab[:, run[len(run) // 2]]
     vstep = np.linalg.norm(np.diff(mid, axis=0), axis=1)
     rows = np.where(vstep > 0.5)[0]
-    if rows.size < h * 0.2:
+    if rows.size < h * 0.12:
         return None
     seg = np.split(rows, np.where(np.diff(rows) > 4)[0] + 1)
     seg = max(seg, key=len)
-    if len(seg) < h * 0.2:
+    if len(seg) < h * 0.12:
         return None
     # trim blur-spread at the ends so palette rows are pure bar colour
     y1, y2 = int(seg[0]) + 4, int(seg[-1]) - 3
@@ -387,3 +387,34 @@ def point_temperature(tmap, x, y, radius=6, mode="max"):
     if v.size == 0:
         return None
     return float(v.max() if mode == "max" else np.median(v))
+
+
+# ------------------------------------------------------------
+# 7. Manual scale (fallback when the colour bar is not detected)
+# ------------------------------------------------------------
+def analyze_with_manual_bar(pil_image, bar_top_xy, bar_bottom_xy, t_max, t_min):
+    """
+    The user clicked the middle of the colour bar at its top and bottom
+    ends and typed the scale max / min. Builds the same result dict as
+    analyze_thermal_image().
+    """
+    rgb = np.array(pil_image.convert("RGB"))
+    (xt, yt), (xb, yb) = bar_top_xy, bar_bottom_xy
+    if yb <= yt or t_max <= t_min:
+        return None
+    xc = int(round((xt + xb) / 2))
+    bar = (max(0, xc - 3), int(yt), xc + 3, int(yb))
+    palette = read_palette(rgb, bar)
+    if len(palette) < 10:
+        return None
+    tmap = pixel_temperature_map(rgb, palette, t_min, t_max, bar, None)
+    stats = region_stats(tmap)
+    return {
+        "min": t_min, "max": t_max,
+        "hot_max": None if not stats else round(stats["max"], 1),
+        "cold_min": None if not stats else round(stats["min"], 1),
+        "confidence": 1.0,
+        "source": "Manual scale (user-entered limits)",
+        "warnings": [],
+        "_tmap": tmap,
+    }
