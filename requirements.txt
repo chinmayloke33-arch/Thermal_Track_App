@@ -7,3 +7,4 @@ psycopg2-binary>=2.9.9
 pytesseract>=0.3.10
 openpyxl>=3.1.2
 tzdata
+streamlit-image-coordinates
