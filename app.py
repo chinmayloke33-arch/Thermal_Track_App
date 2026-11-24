@@ -1778,6 +1778,15 @@ elif page == "Thermal Analysis Studio":
         key="thermal_image_upload"
     )
 
+    # Clear old results whenever the uploaded files change
+    current_upload_sig = tuple(
+        hashlib.sha1(f.getvalue()).hexdigest() for f in (uploaded_files or [])
+    )
+
+    if st.session_state.get("upload_sig") != current_upload_sig:
+        st.session_state["upload_sig"] = current_upload_sig
+        st.session_state.pop("batch_results", None)
+
     if uploaded_files:
         st.write(f"Images selected: **{len(uploaded_files)}**")
 
