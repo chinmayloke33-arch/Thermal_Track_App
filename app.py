@@ -13,7 +13,7 @@ import psycopg2
 import pytesseract
 
 from thermal_core import analyze_thermal_image
-from point_picker import render_point_picker
+from area_picker import render_area_picker
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -1882,17 +1882,17 @@ elif page == "Thermal Analysis Studio":
                 }
 
                 use_points = st.checkbox(
-                    "Select Maximum / Minimum points on the image",
+                    "Select Maximum / Minimum areas on the image",
                     key=f"use_points_{file_key}",
                     help=(
-                        "Click the hottest point (Maximum) and one or two "
-                        "reference points (Minimum). The higher Minimum is "
-                        "used."
+                        "Click and drag a rectangle over the hottest part "
+                        "(Maximum) and one or two reference areas "
+                        "(Minimum). The higher Minimum is used."
                     )
                 )
 
                 if use_points:
-                    picked = render_point_picker(
+                    picked = render_area_picker(
                         Image.open(
                             io.BytesIO(uploaded_file.getvalue())
                         ).convert("RGB"),
