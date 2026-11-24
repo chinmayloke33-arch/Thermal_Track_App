@@ -1,17 +1,18 @@
 """
-point_picker.py - let the user click the Max point and the Min point(s)
-on the thermal image, then show the result.
+area_picker.py - draw rectangles (click and drag) on the thermal image
+instead of clicking single points.
 
-pip install streamlit-image-coordinates   (add to requirements.txt)
+  Maximum area   -> hottest value inside the rectangle
+  Minimum area A -> typical (median) value inside the rectangle
+  Minimum area B -> optional second reference, the higher one is used
 
-Usage in Appcure.py, after the image is uploaded:
+Requires:  streamlit-image-coordinates >= 0.2.0   (click_and_drag support)
+           e.g. in requirements.txt:  streamlit-image-coordinates>=0.2.0
 
-    from point_picker import render_point_picker
-    result = render_point_picker(image, file_key=image_id)
-    if result:
-        maximum_temperature = result["max"]
-        minimum_temperature = result["min"]
-        difference = result["delta"]
+Usage in Appcure.py (same return value as render_point_picker):
+
+    from area_picker import render_area_picker
+    result = render_area_picker(image, file_key=file_key)
 """
 
 import cv2
@@ -19,18 +20,62 @@ import numpy as np
 import streamlit as st
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-from thermal_core import (analyze_thermal_image, analyze_with_manual_bar,
-                          point_temperature)
+from thermal_core import analyze_thermal_image, analyze_with_manual_bar
 
 DISPLAY_WIDTH = 700
-RADIUS = 6  # pixels around the click that are examined
+MAX_PERCENTILE = 99.5   # use 100 for the absolute hottest pixel
+MIN_BOX = 8             # a plain click becomes a box of +/- this many px
+MIN_VALID_PIXELS = 10   # fewer valid pixels in the box -> ask to redraw
 
 
-def render_point_picker(pil_image, file_key):
+def area_temperature(tmap, box, mode="max"):
+    """Temperature inside box=(x1, y1, x2, y2) in tmap pixel coordinates.
+
+    mode="max":    MAX_PERCENTILE of the valid pixels (hottest in the area)
+    mode="median": median of the valid pixels (reference area)
+    Returns None when the box holds too few palette-matched pixels
+    (for example it only covers text).
+    """
+    h, w = tmap.shape[:2]
+    x1, y1, x2, y2 = box
+    x1, x2 = sorted((max(0, int(x1)), min(w, int(x2))))
+    y1, y2 = sorted((max(0, int(y1)), min(h, int(y2))))
+    win = tmap[y1:y2, x1:x2]
+    v = win[~np.isnan(win)]
+    if v.size < MIN_VALID_PIXELS:
+        return None
+    if mode == "max":
+        return float(np.percentile(v, MAX_PERCENTILE))
+    return float(np.median(v))
+
+
+def _empty():
+    return {"max": None, "minA": None, "minB": None,
+            "barTop": None, "barBot": None, "last": None}
+
+
+def _to_box(click, W, H):
+    """Convert a component result (display pixels) to an original-pixel box."""
+    s = W / click["width"]
+    if "x1" in click:
+        x1, y1, x2, y2 = (click["x1"], click["y1"],
+                          click["x2"], click["y2"])
+    else:  # plain click from an older component version
+        x1 = x2 = click["x"]
+        y1 = y2 = click["y"]
+    x1, x2 = sorted((x1 * s, x2 * s))
+    y1, y2 = sorted((y1 * s, y2 * s))
+    if (x2 - x1) < 4 and (y2 - y1) < 4:  # click, not a drag
+        x1, x2 = x1 - MIN_BOX, x2 + MIN_BOX
+        y1, y2 = y1 - MIN_BOX, y2 + MIN_BOX
+    return (max(0, int(x1)), max(0, int(y1)),
+            min(W, int(x2)), min(H, int(y2)))
+
+
+def render_area_picker(pil_image, file_key):
     ss = st.session_state
-    k = f"pp_{file_key}"
-    ss.setdefault(k, {"max": None, "minA": None, "minB": None,
-                      "barTop": None, "barBot": None, "last": None})
+    k = f"ap_{file_key}"
+    ss.setdefault(k, _empty())
     pts = ss[k]
 
     # Temperature map is computed once per image
@@ -54,31 +99,29 @@ def render_point_picker(pil_image, file_key):
             sc_max, sc_min = float(txt_max), float(txt_min)
         except ValueError:
             sc_max = sc_min = None
-
-    if not manual:
-        for w in res["warnings"]:
-            st.warning(w)
+    else:
+        for w_ in res["warnings"]:
+            st.warning(w_)
         st.caption(
             f"Scale read: {res['min']} to {res['max']} °C "
             f"({res['source']})"
         )
 
     target = st.radio(
-        "Click on the image to set:",
-        ["Maximum point", "Minimum point A", "Minimum point B (optional)"]
+        "Draw on the image (click and drag) to set:",
+        ["Maximum area", "Minimum area A", "Minimum area B (optional)"]
         + (["Scale bar TOP", "Scale bar BOTTOM"] if manual else []),
         horizontal=True,
         key=f"{k}_target",
     )
     key_of = {
-        "Maximum point": "max",
-        "Minimum point A": "minA",
-        "Minimum point B (optional)": "minB",
+        "Maximum area": "max",
+        "Minimum area A": "minA",
+        "Minimum area B (optional)": "minB",
         "Scale bar TOP": "barTop",
         "Scale bar BOTTOM": "barBot",
     }[target]
 
-    # Draw markers on a copy, at display size
     rgb = np.array(pil_image.convert("RGB"))
     H, W = rgb.shape[:2]
     scale = DISPLAY_WIDTH / W
@@ -88,29 +131,41 @@ def render_point_picker(pil_image, file_key):
                "barTop": (255, 220, 0), "barBot": (255, 220, 0)}
     labels = {"max": "MAX", "minA": "MIN A", "minB": "MIN B",
               "barTop": "BAR TOP", "barBot": "BAR BOTTOM"}
+
     for name, p in pts.items():
         if name == "last" or p is None:
             continue
-        cx, cy = int(p[0] * scale), int(p[1] * scale)
-        cv2.drawMarker(disp, (cx, cy), colours[name],
-                       cv2.MARKER_CROSS, 22, 2)
-        cv2.putText(disp, labels[name], (cx + 10, cy - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, colours[name], 2)
+        if name in ("barTop", "barBot"):  # still single points
+            cx, cy = int(p[0] * scale), int(p[1] * scale)
+            cv2.drawMarker(disp, (cx, cy), colours[name],
+                           cv2.MARKER_CROSS, 22, 2)
+            cv2.putText(disp, labels[name], (cx + 10, cy - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, colours[name], 2)
+        else:
+            x1, y1, x2, y2 = [int(v * scale) for v in p]
+            cv2.rectangle(disp, (x1, y1), (x2, y2), colours[name], 2)
+            cv2.putText(disp, labels[name], (x1 + 4, max(14, y1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, colours[name], 2)
 
-    click = streamlit_image_coordinates(disp, key=f"{k}_img")
+    click = streamlit_image_coordinates(
+        disp, key=f"{k}_img", click_and_drag=True
+    )
 
-    # Process a NEW click only (the component repeats the last value)
+    # Process a NEW selection only (the component repeats the last value)
     if click and click != pts["last"]:
         pts["last"] = click
-        # convert displayed pixels -> original pixels
-        sx = W / click["width"]
-        pts[key_of] = (int(click["x"] * sx), int(click["y"] * sx))
+        if key_of in ("barTop", "barBot"):
+            s = W / click["width"]
+            cx = click.get("x1", click.get("x"))
+            cy = click.get("y1", click.get("y"))
+            pts[key_of] = (int(cx * s), int(cy * s))
+        else:
+            pts[key_of] = _to_box(click, W, H)
         st.rerun()
 
     col1, col2 = st.columns(2)
-    if col2.button("Clear points", key=f"{k}_clear"):
-        ss[k] = {"max": None, "minA": None, "minB": None,
-                 "barTop": None, "barBot": None, "last": None}
+    if col2.button("Clear areas", key=f"{k}_clear"):
+        ss[k] = _empty()
         st.rerun()
 
     if manual:
@@ -130,18 +185,18 @@ def render_point_picker(pil_image, file_key):
         tmap = mres["_tmap"]
 
     if pts["max"] is None or pts["minA"] is None:
-        st.info("Select a Maximum point and at least Minimum point A.")
+        st.info("Draw a Maximum area and at least Minimum area A.")
         return None
 
-    t_max = point_temperature(tmap, *pts["max"], RADIUS, "max")
-    t_a = point_temperature(tmap, *pts["minA"], RADIUS, "median")
-    t_b = (point_temperature(tmap, *pts["minB"], RADIUS, "median")
+    t_max = area_temperature(tmap, pts["max"], "max")
+    t_a = area_temperature(tmap, pts["minA"], "median")
+    t_b = (area_temperature(tmap, pts["minB"], "median")
            if pts["minB"] else None)
 
     if t_max is None or t_a is None or (pts["minB"] and t_b is None):
         st.error(
-            "A selected point is on text or a spot that does not match "
-            "the colour scale. Click again nearby."
+            "A selected area is mostly text or does not match the colour "
+            "scale. Draw it again over the image."
         )
         return None
 
@@ -157,4 +212,4 @@ def render_point_picker(pil_image, file_key):
                    "(the higher one is used)")
 
     return {"max": round(t_max, 1), "min": round(t_min, 1), "delta": delta,
-            "source": "User-selected points (colour-scale mapped)"}
+            "source": "User-selected areas (colour-scale mapped)"}
