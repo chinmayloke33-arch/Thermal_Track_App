@@ -20,14 +20,14 @@ import cv2
 import numpy as np
 import pytesseract
 
-NUM_RE = re.compile(r"(?<!\d)(\d{1,3}(?:\.\d{1,2})?)(?!\d)")
-MIN_PLAUSIBLE, MAX_PLAUSIBLE = -20.0, 150.0
+NUM_RE = re.compile(r"(?<!\d)(-?\d{1,3}(?:\.\d{1,2})?)(?!\d)")
+MIN_PLAUSIBLE, MAX_PLAUSIBLE = -80.0, 150.0
 
 
 # ------------------------------------------------------------
 # 1. Locate the colour bar
 # ------------------------------------------------------------
-def find_colorbar(rgb):
+def _find_colorbar_gradient(rgb):
     """
     Return (x1, y1, x2, y2) of the vertical colour bar, or None.
 
@@ -79,6 +79,116 @@ def find_colorbar(rgb):
     return x1, y1, x2, y2
 
 
+def find_colorbar(rgb):
+    """
+    Edge method first (works when the bar sits against a smooth
+    background gradient or at the image border), then the gradient
+    method.
+    """
+    bar = _find_colorbar_edges(rgb)
+    if bar is not None:
+        return refine_bar_ends(rgb, bar)
+    return _find_colorbar_gradient(rgb)
+
+
+def _find_colorbar_edges(rgb):
+    """
+    The bar has a sharp vertical left edge that runs for the bar's whole
+    height; smooth scene gradients and thin wires do not. Find that edge,
+    then take the bar from just inside it to the next strong edge or the
+    image border. Returns (x1, y1, x2, y2) or None.
+    """
+    h, w = rgb.shape[:2]
+    x_start = int(w * 0.65)
+    lab = cv2.cvtColor(rgb[:, x_start:], cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab = cv2.GaussianBlur(lab, (0, 0), 0.8)
+    wp = lab.shape[1]
+
+    d = np.linalg.norm(lab[:, :wp - 2] - lab[:, 2:], axis=2)   # (h, wp-2)
+    strong = d > 20
+    edge_len = strong.sum(axis=0)
+    need = int(h * 0.12)
+    cand = np.where(edge_len >= need)[0]
+    if cand.size == 0:
+        return None
+
+    # Edge groups = left / right borders of the bar. If the bar sits
+    # inside the image there are two groups close together; if it touches
+    # the image border only its left edge exists.
+    groups = np.split(cand, np.where(np.diff(cand) > 3)[0] + 1)
+    best = max(int(edge_len[g].max()) for g in groups)
+    # keep only edges nearly as long as the strongest (drops weak texture)
+    groups = [g for g in groups if edge_len[g].max() >= 0.5 * best]
+
+    def peak(g):
+        return int(g[np.argmax(edge_len[g])])
+
+    right_edge = None
+    if len(groups) >= 2:
+        gl, gr = peak(groups[-2]), peak(groups[-1])
+        if 4 <= gr - gl <= w * 0.12:
+            left, right_edge = gl, gr
+    if right_edge is None:
+        left = peak(groups[-1])
+
+    x1 = x_start + left + 3
+    x2 = (x_start + right_edge - 1) if right_edge is not None else (w - 3)
+    if x2 - x1 < 3 or (x2 - x1) > w * 0.12:
+        return None
+
+    # Vertical extent: rows where the left edge is strong AND the bar
+    # columns are horizontally uniform (excludes label text that overlaps
+    # the bar's columns). Gaps up to 60 rows are bridged because the cold
+    # end of the bar can look like the background for a while.
+    cx1, cx2 = x1 - x_start, x2 - x_start
+    block = lab[:, cx1:cx2 + 1]
+    row_dev = np.linalg.norm(block - block.mean(axis=1, keepdims=True), axis=2)
+    row_dev = row_dev.mean(axis=1)
+    ok_rows = strong[:, left] & (row_dev < 8)
+    rows = np.where(ok_rows)[0]
+    if rows.size == 0:
+        return None
+    seg = np.split(rows, np.where(np.diff(rows) > 60)[0] + 1)
+    seg = max(seg, key=len)
+    if (seg[-1] - seg[0]) < need:
+        return None
+    y1, y2 = int(seg[0]) + 2, int(seg[-1]) - 1
+    return x1, y1, x2, y2
+
+
+def refine_bar_ends(rgb, bar):
+    """
+    The bar's colours change smoothly row to row, then jump where the bar
+    ends. Use that jump to correct y1 / y2 (the edge method can stop short
+    where the cold end of the bar resembles the background).
+    """
+    x1, y1, x2, y2 = bar
+    h = rgb.shape[0]
+    c = (x1 + x2) // 2
+    col = cv2.cvtColor(
+        rgb[:, max(0, c - 1):c + 2].astype(np.uint8), cv2.COLOR_RGB2LAB
+    ).astype(np.float32).mean(axis=1)                    # (h, 3)
+    step = np.linalg.norm(np.diff(col, axis=0), axis=1)   # len h-1
+    inner = step[y1 + 8:max(y1 + 9, y2 - 8)]
+    if inner.size == 0:
+        return bar
+    thr = max(6.0, 4.0 * float(np.median(inner)))
+
+    new_y2 = y2
+    for y in range(max(y1 + 20, y2 - 10), min(h - 2, y2 + 90)):
+        if step[y] > thr:
+            new_y2 = y
+            break
+    new_y1 = y1
+    for y in range(y1 + 10, max(0, y1 - 45), -1):
+        if step[y] > thr:
+            new_y1 = y + 1
+            break
+    if new_y2 - new_y1 < 0.12 * h:
+        return bar
+    return x1, new_y1, x2, new_y2
+
+
 def read_palette(rgb, bar):
     """
     Top-to-bottom list of RGB colours along the bar (hot -> cold).
@@ -95,81 +205,107 @@ def read_palette(rgb, bar):
     jump = np.linalg.norm(np.diff(lab, axis=0), axis=1)  # len n-1
 
     lo, hi = 0, len(pal)
-    while lo < hi - 10 and jump[lo] > 12:
-        lo += 1
-    while hi - 1 > lo + 10 and jump[hi - 2] > 12:
-        hi -= 1
+    k = max(3, int(len(pal) * 0.08))
+    head = jump[:k]
+    if head.size and head.max() > 25:
+        lo = int(head.argmax()) + 1
+    tail = jump[-k:]
+    if tail.size and tail.max() > 25:
+        hi = len(jump) - k + int(tail.argmax()) + 1
+    if hi - lo < 10:
+        lo, hi = 0, len(pal)
     return pal[lo:hi]
 
 
 # ------------------------------------------------------------
 # 2. OCR the bar labels
 # ------------------------------------------------------------
+_TOKEN = re.compile(r"-?\d+\.?\d*")
+
+
+def _normalise_token(tok):
+    """'25.5.' -> -?25.5 ; '227' -> 22.7 (labels always have 1 decimal)."""
+    tok = tok.rstrip(".")
+    neg = tok.startswith("-")
+    digits = tok.lstrip("-")
+    if not digits:
+        return None
+    if "." not in digits:
+        if len(digits) < 2:
+            return None
+        digits = digits[:-1] + "." + digits[-1]
+    try:
+        v = float(digits)
+    except ValueError:
+        return None
+    v = -v if neg else v
+    return round(v, 1) if MIN_PLAUSIBLE <= v <= MAX_PLAUSIBLE else None
+
+
 def _ocr_numbers(gray):
+    """OCR one label crop (white text on dark). Returns candidate values."""
     out = []
-    for inv in (False, True):
-        g = 255 - gray if inv else gray
-        g = cv2.resize(g, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
-        for mode in ("otsu", "adaptive"):
+    for scale in (3, 4, 6):
+        g = cv2.resize(gray, None, fx=scale, fy=scale,
+                       interpolation=cv2.INTER_CUBIC)
+        for mode in ("otsu", "fixed"):
             if mode == "otsu":
-                _, t = cv2.threshold(
-                    g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-                )
+                _, b = cv2.threshold(
+                    g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             else:
-                t = cv2.adaptiveThreshold(
-                    g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY, 31, 10
-                )
-            t = cv2.copyMakeBorder(t, 20, 20, 20, 20,
+                _, b = cv2.threshold(g, 150, 255, cv2.THRESH_BINARY)
+            b = 255 - b                        # black text on white
+            b = cv2.copyMakeBorder(b, 20, 20, 20, 20,
                                    cv2.BORDER_CONSTANT, value=255)
             txt = pytesseract.image_to_string(
-                t,
-                config="--psm 7 -c tessedit_char_whitelist=0123456789.-"
-            )
-            for m in NUM_RE.findall(txt):
-                v = float(m)
-                if MIN_PLAUSIBLE <= v <= MAX_PLAUSIBLE:
-                    out.append(round(v, 1))
+                b, config="--psm 7 -c tessedit_char_whitelist=0123456789.-")
+            for tok in _TOKEN.findall(txt):
+                v = _normalise_token(tok)
+                if v is not None:
+                    out.append(v)
     return out
 
 
 def _vote(values):
     if not values:
         return None, 0.0
-    val, count = Counter(values).most_common(1)[0]
-    return val, count / len(values)
+    counts = Counter(values)
+    val = max(counts, key=lambda v: (counts[v], len(str(v))))
+    return val, counts[val] / len(values)
 
 
 def read_scale_limits(rgb, bar):
     """
-    OCR the label next to the top and bottom of the bar. Labels are
-    usually to the right of the bar; the left side is tried if that fails.
-    Returns (t_min, t_max, confidence 0-1) or (None, None, 0).
+    OCR the labels above the top end and below the bottom end of the bar
+    (the usual place on these cameras), then fall back to windows beside
+    the bar. Returns (t_min, t_max, confidence 0-1) or (None, None, 0).
     """
     h, w = rgb.shape[:2]
     x1, y1, x2, y2 = bar
-    pad_y = max(14, int((y2 - y1) * 0.06))
-    reach = max(60, int(w * 0.14))
-    sides = (
-        (x2 + 3, min(w, x2 + 3 + reach)),          # right of bar
-        (max(0, x1 - 3 - reach), max(0, x1 - 3)),  # left of bar
-    )
+    xa = max(0, x1 - 45)
 
-    def crop(xa, xb, top):
-        ya = max(0, (y1 - pad_y) if top else (y2 - pad_y))
-        yb = min(h, (y1 + pad_y) if top else (y2 + pad_y))
-        c = rgb[ya:yb, xa:xb]
-        return cv2.cvtColor(c, cv2.COLOR_RGB2GRAY) if c.size else None
+    def gray(ya, yb, xs, xe):
+        ya, yb = max(0, ya), min(h, yb)
+        if yb - ya < 6 or xe - xs < 10:
+            return None
+        return cv2.cvtColor(rgb[ya:yb, xs:xe], cv2.COLOR_RGB2GRAY)
 
-    for xa, xb in sides:
-        top_img, bot_img = crop(xa, xb, True), crop(xa, xb, False)
+    windows = [
+        (gray(y1 - 30, y1 - 1, xa, w), gray(y2 + 2, y2 + 30, xa, w)),
+        (gray(y1 - 34, y1 + 14, max(0, x1 - 70), min(w, x2 + 1)),
+         gray(y2 - 14, y2 + 34, max(0, x1 - 70), min(w, x2 + 1))),
+        # labels beside the bar (some cameras / exports)
+        (gray(y1 - 14, y1 + 20, x2 + 3, min(w, x2 + 3 + 90)),
+         gray(y2 - 20, y2 + 14, x2 + 3, min(w, x2 + 3 + 90))),
+    ]
+    for top_img, bot_img in windows:
         if top_img is None or bot_img is None:
             continue
         t_max, c_max = _vote(_ocr_numbers(top_img))
         t_min, c_min = _vote(_ocr_numbers(bot_img))
         if t_max is None or t_min is None or t_max <= t_min:
             continue
-        if (t_max - t_min) > 120:
+        if (t_max - t_min) > 200:
             continue
         return t_min, t_max, float(min(c_max, c_min))
     return None, None, 0.0
